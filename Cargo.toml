@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dc-model",
+    "crates/dc-lucid",
+    "crates/dc-vsdx",
+    "crates/dc-geom",
+    "crates/dc-render",
+    "crates/dc-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/diagramcraft/diagramcraft"
+authors = ["DiagramCraft contributors"]
+
+[workspace.dependencies]
+dc-model = { path = "crates/dc-model" }
+dc-lucid = { path = "crates/dc-lucid" }
+dc-vsdx = { path = "crates/dc-vsdx" }
+dc-geom = { path = "crates/dc-geom" }
+dc-render = { path = "crates/dc-render" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+kurbo = "0.13"
+peniko = "0.6"
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,234 @@
+# DiagramCraft
+
+**Open-source diagramming, rebuilt in pure Rust.**
+
+A desktop diagramming editor that reads and writes the Lucid Standard Import
+format. Flowcharts, org charts, network diagrams, and the rest — on macOS,
+Windows, and Linux, with no subscription and no account.
+
+![DiagramCraft editing a flowchart](docs/images/editor.png)
+
+## Why
+
+Diagramming is one of the last productivity categories without a credible
+open-source desktop option. The web tools are good but rented; the desktop tools
+are expensive or abandoned. The moat was never the drawing code — it was the
+file format, and that format is published.
+
+DiagramCraft is GPU-accelerated vector rendering in pure Rust: an 8.5 MB binary
+that opens instantly and does not ship a browser engine to draw rectangles.
+
+## Status
+
+**Early alpha.** The core editing loop is complete and the format round-trips
+faithfully. See [Scope](#scope) for what is and is not implemented.
+
+## Features
+
+**Editing**
+- Direct manipulation: select, move, resize, rotate, marquee-select
+- Alignment snapping with live guides, falling back to the grid
+- Align, distribute, match size, group and ungroup
+- Rotate, flip, reorder one step or all the way, and change a shape's type
+- Copy a style off one object and paint it onto others
+- Full undo and redo, with each drag recorded as a single step
+- Cut, copy, and paste, including between two running copies
+- Multi-page documents: add, duplicate, rename, delete, and drag to reorder
+
+**Text**
+- Edit labels in place: double-click a shape or connector, or press Enter
+- Caret, selection, word movement, and multi-line labels
+- Per-selection styling: bold, italic, underline, strikethrough, size, and
+  colour apply to the characters you highlighted, not the whole label
+- Correct handling of graphemes, emoji, and bidirectional text
+
+**Shapes**
+- All 68 published shape types across eight libraries: Standard, Shapes,
+  Flowchart, Containers, BPMN 2.0, Table, Lucidspark, and the AWS, Azure and
+  GCP cloud libraries
+- Fill, stroke, weight, dash style, corner rounding, opacity, z-order
+- Image fills and image blocks, clipped to the shape outline
+
+**Connectors**
+- Straight, elbow, and curved routing
+- Smart attachment that picks the facing edge as shapes move
+- Orthogonal auto-routing that steers around other shapes
+- 22 endpoint styles: arrows, UML, BPMN, and ERD crow's-foot notation,
+  set per end, with a command to reverse a connector
+- Labeled edges
+
+![Text styling, images, and decorations](docs/images/features.png)
+
+**Files**
+- `.lucid` read and write, lossless for fields this build does not interpret
+- `.vsdx` import: Visio pages, shapes, text, styling, and connectors
+- Bundled images decoded and drawn, clipped to any shape outline
+- PNG export, headless and scriptable
+- Light and dark themes
+- Graph, line, and dot grids
+
+## Install
+
+Requires Rust 1.85 or newer.
+
+```sh
+git clone https://github.com/diagramcraft/diagramcraft
+cd diagramcraft
+cargo run --release
+```
+
+## Usage
+
+```sh
+diagramcraft                                  # open the editor
+diagramcraft diagram.lucid                    # open a document
+diagramcraft drawing.vsdx                     # import a Visio drawing
+diagramcraft export in.lucid out.png 2        # render to PNG at 2x
+diagramcraft import in.vsdx out.lucid         # convert Visio, headlessly
+diagramcraft preview in.lucid shot.png        # screenshot the editor itself
+diagramcraft demo out.lucid                   # write the bundled sample
+```
+
+Try the sample:
+
+```sh
+cargo run --release -- samples/approval.lucid
+```
+
+### Interface
+
+Commands live in the menu bar — **File, Edit, Select, Insert, Format, Arrange,
+View, Help** — so the whole command surface is in one place with its shortcuts
+beside it. On macOS that is the real system menu bar; elsewhere the window
+draws its own. The panels hold what you reach for continuously while drawing:
+the shape palette on the left, with a tab per library; the properties of the
+selection on the right; and the page tabs along the bottom, which can be
+dragged to reorder.
+
+The properties panel draws its choices rather than naming them, the way
+Lucidchart's does: the weight picker shows the weights, the line-style picker
+shows the dashes, the endpoint pickers show the terminators, and the bold
+button is bold. Every row marks the value the selection already has, and shows
+none when the selection disagrees. The panel is also dynamic — connector rows
+appear for connectors, shape rows for shapes, and everything when nothing is
+selected.
+
+### Settings
+
+`⌘,` opens the preferences: theme, grid style and size, what snaps to what,
+default connector routing, zoom step, and what a new document starts as. They
+are saved as you change them and read back at launch.
+
+![Settings](docs/images/settings.png)
+
+### Keyboard
+
+| | |
+|---|---|
+| `V` `H` `C` | select, pan, connector |
+| `R` `P` `D` `T` | rectangle, process, decision, text |
+| Space (hold) | pan with any tool |
+| `⌘Z` / `⇧⌘Z` | undo / redo |
+| `⌘S` `⌘O` `⌘N` | save, open, new |
+| `⇧⌘S` `⇧⌘E` | save as, export PNG |
+| `⌘A` `⌘D` | select all, duplicate |
+| `⌘C` `⌘X` `⌘V` | copy, cut, paste |
+| `⌘G` / `⇧⌘G` | group / ungroup |
+| `⌘]` / `⌘[` | bring forward / send backward |
+| `Alt⌘C` / `Alt⌘V` | copy style / paste style |
+| `⌘B` `⌘I` `⌘U` `⇧⌘X` | bold, italic, underline, strikethrough |
+| `⇧⌘.` / `⇧⌘,` | larger / smaller text |
+| `⇧⌘]` / `⇧⌘[` | bring to front / send to back |
+| `⌘0` `⌘1` | actual size, zoom to fit |
+| `⌘,` | settings |
+| Arrows | nudge (hold shift for 10×) |
+| Shift-drag | lock axis, or keep proportions on a corner |
+| `⌘`-drag | bypass snapping |
+| Drag a page tab | reorder pages |
+
+**While editing a label**
+
+| | |
+|---|---|
+| Double-click, or Enter | open the label under the pointer or selection |
+| Enter / Shift-Enter | finish / insert a line break |
+| Escape | discard the edit |
+| Double-click a word | select it |
+| `⌥`-arrows | move by word |
+| `⌘`-Home / End | jump to the start or end |
+| Double-click a page tab | rename the page |
+
+## Architecture
+
+Six crates, each independently testable:
+
+| Crate | Responsibility |
+|---|---|
+| `dc-model` | Document types, serde, markup parsing. No I/O. |
+| `dc-lucid` | `.lucid` package read/write and validation. |
+| `dc-vsdx` | Visio `.vsdx` import: OPC container, XML parts, coordinates. |
+| `dc-geom` | Shape outlines, connector routing, endpoint markers. Pure geometry. |
+| `dc-render` | Vello scene construction, camera, theme, text. No GPU ownership. |
+| `dc-app` | Window, event loop, editor state, undo, menus, settings, chrome. |
+
+The renderer builds scenes without owning a GPU device, so the entire render
+path is unit-tested on machines with no graphics hardware. `dc-app`'s editor
+logic is likewise separated from the window layer: every tool, gesture,
+command, and menu is tested without opening a window.
+
+```sh
+cargo test --workspace     # 800 tests
+```
+
+## Scope
+
+Implemented: all eight published shape libraries, all three connector routings,
+the published endpoint styles, pages, groups, layers, per-selection text
+styling, the text markup subset, the full `.lucid` container, and `.vsdx`
+import.
+
+Known limits:
+
+- **Cloud icon artwork.** AWS, Azure, and GCP shapes carry a `className` naming
+  an icon whose artwork the format does not ship. They import, draw as a tile
+  with the vendor's mark and the shape's text, stay editable, and save with the
+  class name intact — but the icon itself is not reproduced.
+- **Table cell text.** A table's rows, columns, and rules are drawn; the format
+  stores each cell's text in a `cells` array that this build round-trips
+  untouched rather than rendering.
+- **Mixed-size caret hit testing.** Caret motion is delegated to Parley's
+  `PlainEditor`, which lays out in a single style. Where a label mixes font
+  sizes, clicking into it can land a character off. The painted text is always
+  the real, mixed-style layout.
+- **`.vsdx` export.** Import only; DiagramCraft writes `.lucid`.
+- **Real-time collaboration and comments.** Out of scope.
+
+## Compatibility
+
+Documents round-trip *semantically*: every field present on load is present on
+save, including fields from libraries this build does not implement. It is not
+byte-exact, because JSON key order and number formatting carry no meaning in
+this format.
+
+## Provenance
+
+DiagramCraft was built from Lucid's published Standard Import documentation.
+Nothing here was derived from decompilation, disassembly, or recovered source,
+and no proprietary asset was copied. Every structural fact traces to a public
+URL.
+
+The full source list, methodology, and an honest accounting of where the
+published specification stops is in
+**[docs/FORMAT-PROVENANCE.md](docs/FORMAT-PROVENANCE.md)**.
+
+## Built with
+
+[Vello](https://github.com/linebender/vello) for GPU vector rendering,
+[Parley](https://github.com/linebender/parley) for text layout,
+[Kurbo](https://github.com/linebender/kurbo) for curves,
+[wgpu](https://wgpu.rs) and [winit](https://github.com/rust-windowing/winit)
+for the platform layer.
+
+## License
+
+MIT OR Apache-2.0, at your option.

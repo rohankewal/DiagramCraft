@@ -1,0 +1,44 @@
+[package]
+name = "dc-app"
+description = "DiagramCraft, an open-source diagramming editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "diagramcraft"
+path = "src/main.rs"
+
+[dependencies]
+dc-model = { workspace = true }
+dc-lucid = { workspace = true }
+dc-vsdx = { workspace = true }
+dc-geom = { workspace = true }
+dc-render = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+parley = "0.12"
+vello = "0.11"
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+env_logger = "0.11"
+log = { workspace = true }
+thiserror = { workspace = true }
+rfd = "0.15"
+png = "0.18"
+arboard = { version = "3.7", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# The menu bar belongs to the system on macOS, so the commands go into the
+# real NSMenu rather than a row drawn inside the window. Other platforms keep
+# the in-window menu bar, which is why this is not a workspace dependency.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.19", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+zip = { workspace = true }

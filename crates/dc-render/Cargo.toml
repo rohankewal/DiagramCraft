@@ -1,0 +1,24 @@
+[package]
+name = "dc-render"
+description = "GPU scene construction for diagram documents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dc-model = { workspace = true }
+dc-geom = { workspace = true }
+# Only so that the render options a user can choose between — the grid style —
+# can be written to their settings file.
+serde = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+vello = "0.11"
+parley = "0.12"
+log = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+[dev-dependencies]
+png = "0.18"

@@ -1,0 +1,19 @@
+# Build output. Cargo rebuilds this from source, and it runs to gigabytes.
+/target/
+
+# Cargo's lock file is committed: this workspace builds a binary, and an
+# application wants a reproducible dependency graph. Were it a library, the
+# opposite would be right.
+
+# Editor and tooling state.
+.idea/
+.vscode/
+*.iml
+
+# macOS directory metadata.
+.DS_Store
+
+# Scratch output: rendered previews and exports written during development.
+/*.png
+/*.lucid
+!/samples/*.lucid

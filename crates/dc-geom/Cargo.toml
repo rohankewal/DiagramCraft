@@ -1,0 +1,15 @@
+[package]
+name = "dc-geom"
+description = "Shape outlines, connector routing, and hit testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dc-model = { workspace = true }
+kurbo = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
