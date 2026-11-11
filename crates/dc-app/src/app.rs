@@ -16,7 +16,7 @@
 use crate::editor::{Editor, Mods, Tool};
 use crate::menu::ViewState;
 use crate::textedit::{TextCommand, TextCtx};
-use crate::ui::{Chrome, SettingChange, TabDrag, UiAction};
+use crate::ui::{Chrome, RegionKind, SettingChange, TabDrag, UiAction};
 use dc_model::Point;
 use dc_render::theme::{Metrics, Theme};
 use kurbo::{Affine, Vec2};
@@ -81,6 +81,8 @@ pub struct App {
 
     /// The menu currently dropped down, by index.
     open_menu: Option<usize>,
+    /// A right-click context menu, and where it is anchored.
+    context_menu: Option<(crate::ui::ContextTarget, kurbo::Point)>,
     /// The system menu bar, where the platform has one.
     #[cfg(target_os = "macos")]
     native_menus: Option<crate::native_menu::NativeMenus>,
@@ -91,6 +93,9 @@ pub struct App {
     tab_drag: Option<TabDrag>,
     /// Where a press on a page tab started, so a click can be told from a drag.
     tab_press: Option<(usize, f64)>,
+    /// A shape tile pressed but not yet resolved into a click or a drag onto
+    /// the canvas.
+    shape_tile_press: bool,
 
     /// Window size in logical pixels.
     window_size: Vec2,
@@ -159,11 +164,13 @@ impl App {
             },
             view: ViewState::default(),
             open_menu: None,
+            context_menu: None,
             #[cfg(target_os = "macos")]
             native_menus: None,
             proxy: None,
             tab_drag: None,
             tab_press: None,
+            shape_tile_press: false,
             window_size: Vec2::new(1440.0, 900.0),
             scale_factor: 1.0,
             pointer: kurbo::Point::ZERO,
@@ -292,6 +299,7 @@ impl App {
             &self.view,
             self.open_menu,
             self.tab_drag,
+            self.context_menu,
         )
     }
 
@@ -346,6 +354,7 @@ impl App {
             &self.view,
             self.open_menu,
             self.tab_drag,
+            self.context_menu,
         );
         let canvas = chrome.layout.canvas;
 
@@ -538,6 +547,15 @@ impl App {
         }
 
         let chrome = self.chrome();
+
+        // A press on a shape tile rides along with the pointer rather than
+        // sizing a box: the shape drops at its default size wherever the
+        // button comes back up, so there is nothing to update here.
+        if self.shape_tile_press {
+            self.request_redraw();
+            return;
+        }
+
         self.hovered_region = chrome.hit(self.pointer);
 
         // Sliding across the bar with a menu open switches to the menu under
@@ -567,6 +585,31 @@ impl App {
 
     fn on_pointer_down(&mut self, button: MouseButton) {
         let chrome = self.chrome();
+        self.shape_tile_press = false;
+
+        if button == MouseButton::Right {
+            self.editor.commit_text_edit();
+            self.open_menu = None;
+            self.context_menu = None;
+
+            if let Some(index) = chrome.hit(self.pointer) {
+                // A page tab gets its own menu, for the page it names rather
+                // than whichever page happens to be active.
+                if let UiAction::SelectPage(page) = chrome.regions[index].action {
+                    self.context_menu = Some((crate::ui::ContextTarget::Page(page), self.pointer));
+                }
+            } else if chrome.layout.canvas.contains(self.pointer) {
+                // Right-clicking settles the selection first, the same way
+                // every other diagramming tool does, so the menu that opens
+                // always matches what it is about to act on.
+                let local = self.canvas_point(self.pointer, &chrome);
+                let doc_point = self.editor.camera.screen_to_doc(local);
+                self.editor.select_for_context_menu(doc_point);
+                self.context_menu = Some((crate::ui::ContextTarget::Canvas, self.pointer));
+            }
+            self.request_redraw();
+            return;
+        }
 
         if button == MouseButton::Left {
             // A click inside an open page-title edit drives its caret.
@@ -628,6 +671,7 @@ impl App {
                     // turn out to be the start of a drag that reorders pages.
                     self.tab_press = Some((page, self.pointer.x));
                     self.open_menu = None;
+                    self.context_menu = None;
                     self.request_redraw();
                     return;
                 }
@@ -635,8 +679,24 @@ impl App {
 
                 // Running a command closes whatever menu it came from.
                 self.open_menu = None;
+                self.context_menu = None;
                 self.perform(action);
+                // A press on a shape tile selects the tool, same as a click
+                // would, but also remembers that the press might keep going
+                // straight onto the canvas as one continuous drag-and-drop.
+                self.shape_tile_press = matches!(region.kind, RegionKind::ShapeTile(_));
                 self.update_title();
+                self.request_redraw();
+                return;
+            }
+
+            if self.context_menu.is_some() {
+                // Same deal as the open menu below: a miss inside the panel
+                // is swallowed rather than treated as a dismissal.
+                if chrome.covered_by_context_menu(self.pointer) {
+                    return;
+                }
+                self.context_menu = None;
                 self.request_redraw();
                 return;
             }
@@ -687,6 +747,27 @@ impl App {
         // A press on a tab that never became a drag is a plain click.
         if let Some((page, _)) = self.tab_press.take() {
             self.editor.select_page(page);
+            self.request_redraw();
+            return;
+        }
+
+        // A shape tile dropped over the canvas places the shape at its
+        // default size, centered wherever the button came back up — a
+        // drag-and-drop, not a box drawn out by the gesture's path.
+        if self.shape_tile_press {
+            self.shape_tile_press = false;
+            let chrome = self.chrome();
+            if chrome.layout.canvas.contains(self.pointer) {
+                if let Tool::Shape(shape_type) = self.editor.tool.clone() {
+                    let local = self.canvas_point(self.pointer, &chrome);
+                    let doc_point = self.editor.camera.screen_to_doc(local);
+                    let (w, h) = shape_type.default_size();
+                    let box_ = dc_model::BoundingBox::new(doc_point.x - w / 2.0, doc_point.y - h / 2.0, w, h);
+                    self.editor.create_shape(shape_type, box_);
+                    self.editor.tool = Tool::Select;
+                }
+            }
+            self.update_title();
             self.request_redraw();
             return;
         }
@@ -782,6 +863,7 @@ impl App {
                 // then an open menu, then the selection, then the tool.
                 if self.view.settings_open {
                     self.view.settings_open = false;
+                } else if self.context_menu.take().is_some() {
                 } else if self.open_menu.take().is_some() {
                 } else if self.editor.tool == Tool::Select {
                     self.editor.clear_selection();
@@ -1181,6 +1263,7 @@ impl App {
             UiAction::OpenSettings => {
                 self.editor.commit_text_edit();
                 self.open_menu = None;
+                self.context_menu = None;
                 self.view.settings_open = true;
             }
             UiAction::CloseSettings => self.view.settings_open = false,
@@ -1900,6 +1983,58 @@ mod tests {
     }
 
     #[test]
+    fn dragging_a_shape_tile_straight_onto_the_canvas_drops_it_there() {
+        // The status hint says "drag a shape from the left panel to begin",
+        // so a press-drag-release that never lets go of the button must
+        // place the shape, not just arm the tool for a later click.
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let chrome = a.chrome();
+        let tile = chrome
+            .regions
+            .iter()
+            .find(|r| matches!(r.kind, crate::ui::RegionKind::ShapeTile(_)))
+            .expect("a shape tile");
+        let shape_type = match &tile.kind {
+            crate::ui::RegionKind::ShapeTile(t) => t.clone(),
+            _ => unreachable!(),
+        };
+        a.pointer = tile.rect.center();
+
+        a.on_pointer_down(MouseButton::Left);
+        assert!(a.editor.page().shapes().is_empty(), "pressing alone places nothing yet");
+
+        // The pointer crosses onto the canvas, then keeps moving to settle
+        // on the spot the user actually wants — this must not get read as
+        // a box being drawn out from where it first crossed in.
+        let entry = chrome.layout.canvas.center();
+        a.pointer = entry;
+        a.on_pointer_move();
+        let drop = kurbo::Point::new(entry.x + 150.0, entry.y + 80.0);
+        a.pointer = drop;
+        a.on_pointer_move();
+        a.on_pointer_up();
+
+        assert_eq!(
+            a.editor.page().shapes().len(),
+            1,
+            "dragging from the tile onto the canvas should drop a shape"
+        );
+        let bb = a.editor.page().shapes()[0].bounding_box;
+        let (w, h) = shape_type.default_size();
+        assert_eq!(
+            (bb.w, bb.h),
+            (w, h),
+            "a drag-and-drop places the shape at its default size, not a size drawn by the gesture"
+        );
+        let expected_center = a.editor.camera.screen_to_doc(a.canvas_point(drop, &chrome));
+        assert!(
+            (bb.center().x - expected_center.x).abs() < 0.01 && (bb.center().y - expected_center.y).abs() < 0.01,
+            "the shape should be centered where the pointer let go, not where it entered the canvas"
+        );
+    }
+
+    #[test]
     fn wheel_over_a_panel_does_not_scroll_the_canvas() {
         let mut a = app();
         a.sync_canvas_viewport();
@@ -1917,6 +2052,157 @@ mod tests {
         let before = a.editor.camera.origin;
         a.on_wheel(MouseScrollDelta::LineDelta(0.0, 3.0));
         assert_ne!(a.editor.camera.origin, before);
+    }
+
+    // -------------------------------------------------- right-click menu
+
+    /// Where a window-space point lands in document coordinates, so a test
+    /// shape can be placed exactly under a click rather than guessing.
+    fn doc_point_at(a: &App, window_point: kurbo::Point) -> Point {
+        let chrome = a.chrome();
+        let local = a.canvas_point(window_point, &chrome);
+        a.editor.camera.screen_to_doc(local)
+    }
+
+    #[test]
+    fn right_clicking_blank_canvas_opens_the_canvas_menu() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        a.pointer = a.chrome().layout.canvas.center();
+
+        a.on_pointer_down(MouseButton::Right);
+
+        let (target, at) = a.context_menu.expect("a context menu should be up");
+        assert_eq!(target, crate::ui::ContextTarget::Canvas);
+        assert_eq!(at, a.pointer);
+        assert!(a.editor.selection.is_empty());
+    }
+
+    #[test]
+    fn right_clicking_a_shape_selects_it_and_opens_its_menu() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let center = a.chrome().layout.canvas.center();
+        let doc = doc_point_at(&a, center);
+        let id = a.editor.create_shape(
+            dc_model::ShapeType::Rectangle,
+            dc_model::BoundingBox::new(doc.x - 50.0, doc.y - 30.0, 100.0, 60.0),
+        );
+        a.editor.selection.clear();
+
+        a.pointer = center;
+        a.on_pointer_down(MouseButton::Right);
+
+        assert_eq!(a.editor.selection, vec![id]);
+        let (target, _) = a.context_menu.expect("a context menu should be up");
+        assert_eq!(target, crate::ui::ContextTarget::Canvas);
+    }
+
+    #[test]
+    fn right_clicking_inside_a_multi_selection_leaves_it_intact() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let center = a.chrome().layout.canvas.center();
+        let doc = doc_point_at(&a, center);
+        let first = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(doc.x - 10.0, doc.y - 10.0, 20.0, 20.0));
+        let second = a.editor.create_shape(
+            dc_model::ShapeType::Rectangle,
+            dc_model::BoundingBox::new(doc.x + 200.0, doc.y - 10.0, 20.0, 20.0),
+        );
+        a.editor.selection = vec![first.clone(), second.clone()];
+
+        a.pointer = center;
+        a.on_pointer_down(MouseButton::Right);
+
+        let mut selection = a.editor.selection.clone();
+        selection.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(selection, expected, "right-clicking a member of the selection must not shrink it");
+    }
+
+    #[test]
+    fn right_clicking_a_page_tab_opens_its_menu_without_switching_pages() {
+        let mut a = app_with_window_menus();
+        a.editor.add_page();
+        let active_before = a.editor.page_index;
+
+        let chrome = a.chrome();
+        let tab = chrome
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::SelectPage(0))
+            .expect("the first tab");
+        a.pointer = tab.rect.center();
+
+        a.on_pointer_down(MouseButton::Right);
+
+        assert_eq!(a.editor.page_index, active_before, "a right click must not switch pages");
+        let (target, _) = a.context_menu.expect("a context menu should be up");
+        assert_eq!(target, crate::ui::ContextTarget::Page(0));
+    }
+
+    #[test]
+    fn clicking_a_context_menu_entry_runs_it_and_closes_the_menu() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let center = a.chrome().layout.canvas.center();
+        let doc = doc_point_at(&a, center);
+        let id = a.editor.create_shape(
+            dc_model::ShapeType::Rectangle,
+            dc_model::BoundingBox::new(doc.x - 50.0, doc.y - 30.0, 100.0, 60.0),
+        );
+        a.pointer = center;
+        a.on_pointer_down(MouseButton::Right);
+        a.on_pointer_up();
+
+        let chrome = a.chrome();
+        let entry = chrome
+            .regions
+            .iter()
+            .find(|r| r.label == "Delete")
+            .expect("a Delete entry");
+        a.pointer = entry.rect.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(a.context_menu.is_none(), "running a command closes the menu");
+        assert!(a.editor.page().shape(&id).is_none(), "the shape should be gone");
+    }
+
+    #[test]
+    fn clicking_outside_the_context_menu_dismisses_it() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        a.pointer = a.chrome().layout.canvas.center();
+        a.on_pointer_down(MouseButton::Right);
+        a.on_pointer_up();
+        assert!(a.context_menu.is_some());
+
+        a.pointer = kurbo::Point::new(2.0, 2.0);
+        a.on_pointer_down(MouseButton::Left);
+        assert!(a.context_menu.is_none());
+    }
+
+    #[test]
+    fn escape_closes_the_context_menu_before_touching_the_selection() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let center = a.chrome().layout.canvas.center();
+        let doc = doc_point_at(&a, center);
+        let id = a.editor.create_shape(
+            dc_model::ShapeType::Rectangle,
+            dc_model::BoundingBox::new(doc.x - 50.0, doc.y - 30.0, 100.0, 60.0),
+        );
+        a.pointer = center;
+        a.on_pointer_down(MouseButton::Right);
+        a.on_pointer_up();
+        assert!(a.context_menu.is_some());
+
+        a.on_key_compat(&Key::Named(NamedKey::Escape), ElementState::Pressed);
+        assert!(a.context_menu.is_none());
+        assert_eq!(a.editor.selection, vec![id], "the selection should survive");
     }
 
     // ------------------------------------------------ editing through keys

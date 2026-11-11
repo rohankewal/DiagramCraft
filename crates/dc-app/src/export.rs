@@ -133,11 +133,11 @@ pub fn render_editor_png(
         library,
         settings_open,
     };
-    let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None);
+    let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None, None);
     let canvas = chrome.layout.canvas;
     editor.resize_viewport(canvas.width(), canvas.height());
     // Rebuild so the chrome reflects the camera that was just sized.
-    let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None);
+    let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None, None);
 
     let mut renderer = Renderer::new();
     renderer.theme = if dark { Theme::dark() } else { Theme::light() };

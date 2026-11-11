@@ -762,6 +762,24 @@ impl Editor {
         }
     }
 
+    /// Settles the selection for a right click: a click on something already
+    /// selected leaves a multi-selection alone, a click on something else
+    /// takes just that shape's group, and a click on empty space clears the
+    /// selection — so the context menu that follows always matches what it
+    /// is about to act on.
+    pub fn select_for_context_menu(&mut self, doc_point: Point) {
+        match self.pick_at(doc_point) {
+            Some(id) => {
+                let picked = self.group_members_of(&id);
+                let already = picked.iter().all(|i| self.selection.contains(i));
+                if !already {
+                    self.selection = picked;
+                }
+            }
+            None => self.selection.clear(),
+        }
+    }
+
     fn start_handle_drag(&mut self, handle: HandleKind, doc_point: Point) {
         let Some(original_bounds) = self.selection_bounds() else {
             return;

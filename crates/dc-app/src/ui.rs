@@ -388,12 +388,25 @@ pub struct TabDrag {
     pub pointer_x: f64,
 }
 
+/// What a right click landed on, which decides which commands the context
+/// menu offers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ContextTarget {
+    /// The canvas, or a shape on it — the editor's selection at the time of
+    /// the click decides which of the two this is.
+    Canvas,
+    /// A specific page tab, by index, regardless of which page is active.
+    Page(usize),
+}
+
 /// Chrome built for one frame.
 pub struct Chrome {
     pub layout: Layout,
     pub regions: Vec<Region>,
     /// The index of the open menu, and the rectangle it covers.
     pub open_menu: Option<(usize, Rect)>,
+    /// The rectangle a right-click context menu covers, when one is up.
+    pub context_menu: Option<Rect>,
     /// The settings screen's sheet, when it is up.
     pub settings_sheet: Option<Rect>,
     /// Where each page tab sits, so a drag can be resolved to an index.
@@ -453,6 +466,7 @@ impl Chrome {
         view: &ViewState,
         open_menu: Option<usize>,
         tab_drag: Option<TabDrag>,
+        context_menu: Option<(ContextTarget, kurbo::Point)>,
     ) -> Chrome {
         let layout = Layout::compute(window, metrics);
         let mut regions = Vec::new();
@@ -473,12 +487,19 @@ impl Chrome {
                 (index, rect)
             });
 
+        // A context menu paints over everything else the same way, including
+        // a menu-bar menu that happened to still be open.
+        let context_menu = context_menu.map(|(target, at)| {
+            let menu = menu::context_menu(editor, target);
+            build_context_menu(&layout, &menu, at, &mut regions)
+        });
+
         // The settings screen covers everything, menus included.
         let settings_sheet = view
             .settings_open
             .then(|| build_settings(&layout, view, &mut regions));
 
-        Chrome { layout, regions, open_menu: open, settings_sheet, tab_rects }
+        Chrome { layout, regions, open_menu: open, context_menu, settings_sheet, tab_rects }
     }
 
     /// The control under a window-space point.
@@ -491,6 +512,16 @@ impl Chrome {
         // after the rest of the chrome and its scrim covers the whole window,
         // so the topmost-wins rule below already stops a click reaching
         // anything behind it.
+
+        // A context menu is opaque in the same way an open menu is, and it
+        // paints on top of one if both somehow landed open at once.
+        if self.covered_by_context_menu(p) {
+            return self.regions.iter().rposition(|r| {
+                matches!(r.kind, RegionKind::MenuEntry { .. })
+                    && r.is_clickable()
+                    && r.rect.contains(p)
+            });
+        }
 
         // An open menu is opaque: a point inside its panel can only reach that
         // menu's own entries, never a control the panel happens to cover. A
@@ -514,7 +545,7 @@ impl Chrome {
     pub fn is_over_canvas(&self, p: kurbo::Point) -> bool {
         // The settings screen is modal, so nothing is over the canvas while
         // it is up.
-        if self.settings_sheet.is_some() || self.covered_by_open_menu(p) {
+        if self.settings_sheet.is_some() || self.covered_by_open_menu(p) || self.covered_by_context_menu(p) {
             return false;
         }
         self.layout.canvas.contains(p) && self.hit(p).is_none()
@@ -523,6 +554,11 @@ impl Chrome {
     /// Whether a point falls inside the open menu's panel.
     pub fn covered_by_open_menu(&self, p: kurbo::Point) -> bool {
         self.open_menu.is_some_and(|(_, rect)| rect.contains(p))
+    }
+
+    /// Whether a point falls inside the context menu's panel.
+    pub fn covered_by_context_menu(&self, p: kurbo::Point) -> bool {
+        self.context_menu.is_some_and(|rect| rect.contains(p))
     }
 
     /// The page tab index a pointer at `x` is over or nearest to.
@@ -1321,7 +1357,10 @@ fn build_menubar(
 }
 
 /// Lays an open menu out beneath its title, and returns the panel rectangle.
-fn build_open_menu(layout: &Layout, menu: &Menu, title: Rect, out: &mut Vec<Region>) -> Rect {
+/// The width and height a menu's panel needs: wide enough for the longest
+/// label plus the shortcut column, tall enough for every row, neither ever
+/// wider or taller than the window itself.
+fn menu_panel_extent(layout: &Layout, menu: &Menu) -> (f64, f64) {
     let height: f64 = menu
         .items
         .iter()
@@ -1329,8 +1368,6 @@ fn build_open_menu(layout: &Layout, menu: &Menu, title: Rect, out: &mut Vec<Regi
         .sum::<f64>()
         + MENU_PAD * 2.0;
 
-    // Wide enough for the longest label plus the shortcut column, and never
-    // wider than the window.
     let widest = menu
         .items
         .iter()
@@ -1338,15 +1375,11 @@ fn build_open_menu(layout: &Layout, menu: &Menu, title: Rect, out: &mut Vec<Regi
         .fold(0.0_f64, f64::max);
     let width = (widest + 30.0 + SHORTCUT_COLUMN).clamp(180.0, layout.viewport.x.max(180.0));
 
-    // Flip to the left of the title rather than overflow the window.
-    let x0 = if title.x0 + width <= layout.viewport.x {
-        title.x0
-    } else {
-        (layout.viewport.x - width).max(0.0)
-    };
-    let y0 = title.y1 + 2.0;
-    let panel = Rect::new(x0, y0, x0 + width, (y0 + height).min(layout.viewport.y));
+    (width, height)
+}
 
+/// Lays a menu's items out inside an already-placed panel.
+fn fill_menu_panel(panel: Rect, menu: &Menu, out: &mut Vec<Region>) {
     out.push(Region {
         rect: panel,
         action: UiAction::NoOp,
@@ -1381,7 +1414,44 @@ fn build_open_menu(layout: &Layout, menu: &Menu, title: Rect, out: &mut Vec<Regi
         });
         y += row;
     }
+}
 
+fn build_open_menu(layout: &Layout, menu: &Menu, title: Rect, out: &mut Vec<Region>) -> Rect {
+    let (width, height) = menu_panel_extent(layout, menu);
+
+    // Flip to the left of the title rather than overflow the window.
+    let x0 = if title.x0 + width <= layout.viewport.x {
+        title.x0
+    } else {
+        (layout.viewport.x - width).max(0.0)
+    };
+    let y0 = title.y1 + 2.0;
+    let panel = Rect::new(x0, y0, x0 + width, (y0 + height).min(layout.viewport.y));
+
+    fill_menu_panel(panel, menu, out);
+    panel
+}
+
+/// Lays a context menu out anchored at the point that was clicked, the way a
+/// native right-click menu does: it opens below and to the right of the
+/// click, but flips to whichever side still has room rather than running off
+/// a window edge.
+fn build_context_menu(layout: &Layout, menu: &Menu, at: kurbo::Point, out: &mut Vec<Region>) -> Rect {
+    let (width, height) = menu_panel_extent(layout, menu);
+
+    let x0 = if at.x + width <= layout.viewport.x {
+        at.x
+    } else {
+        (layout.viewport.x - width).max(0.0)
+    };
+    let y0 = if at.y + height <= layout.viewport.y {
+        at.y
+    } else {
+        (at.y - height).max(0.0)
+    };
+    let panel = Rect::new(x0, y0, x0 + width, (y0 + height).min(layout.viewport.y));
+
+    fill_menu_panel(panel, menu, out);
     panel
 }
 
@@ -2546,7 +2616,7 @@ mod tests {
     }
 
     fn chrome(e: &Editor) -> Chrome {
-        Chrome::build_for(window(), e, &Metrics::default(), &ViewState::default(), None, None)
+        Chrome::build_for(window(), e, &Metrics::default(), &ViewState::default(), None, None, None)
     }
 
     fn chrome_with_menu(e: &Editor, menu: usize) -> Chrome {
@@ -2557,12 +2627,13 @@ mod tests {
             &ViewState::default(),
             Some(menu),
             None,
+            None,
         )
     }
 
     fn chrome_with_library(e: &Editor, library: ShapeLibrary) -> Chrome {
         let view = ViewState { library, ..Default::default() };
-        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None)
+        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None, None)
     }
 
     #[test]
@@ -2696,10 +2767,98 @@ mod tests {
             &ViewState::default(),
             Some(7),
             None,
+            None,
         );
         let (_, panel) = c.open_menu.unwrap();
         assert!(panel.x1 <= narrow.x + 0.01, "the panel ran off at {}", panel.x1);
         assert!(panel.x0 >= 0.0);
+    }
+
+    // ------------------------------------------------------- context menu
+
+    fn chrome_with_context_menu(e: &Editor, target: ContextTarget, at: kurbo::Point) -> Chrome {
+        Chrome::build_for(
+            window(),
+            e,
+            &Metrics::default(),
+            &ViewState::default(),
+            None,
+            None,
+            Some((target, at)),
+        )
+    }
+
+    #[test]
+    fn a_context_menu_opens_at_the_click_point() {
+        let e = editor();
+        let at = kurbo::Point::new(200.0, 150.0);
+        let c = chrome_with_context_menu(&e, ContextTarget::Canvas, at);
+        let panel = c.context_menu.expect("a context menu should be up");
+        assert!((panel.x0 - at.x).abs() < 0.5);
+        assert!((panel.y0 - at.y).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_context_menu_near_the_bottom_flips_upward_rather_than_clip() {
+        let e = editor();
+        let w = window();
+        let at = kurbo::Point::new(200.0, w.y - 10.0);
+        let c = chrome_with_context_menu(&e, ContextTarget::Canvas, at);
+        let panel = c.context_menu.unwrap();
+        assert!(panel.y1 <= w.y + 0.01, "the panel ran off the bottom at {}", panel.y1);
+        assert!(panel.y1 <= at.y + 0.01, "it should open above the click, not below it");
+    }
+
+    #[test]
+    fn a_context_menu_near_the_right_edge_flips_left() {
+        let e = editor();
+        let w = window();
+        let at = kurbo::Point::new(w.x - 5.0, 200.0);
+        let c = chrome_with_context_menu(&e, ContextTarget::Canvas, at);
+        let panel = c.context_menu.unwrap();
+        assert!(panel.x1 <= w.x + 0.01, "the panel ran off the right edge at {}", panel.x1);
+        assert!(panel.x0 >= 0.0);
+    }
+
+    #[test]
+    fn a_context_menu_is_opaque_for_hit_testing() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        let at = kurbo::Point::new(200.0, 150.0);
+        let c = chrome_with_context_menu(&e, ContextTarget::Canvas, at);
+        let panel = c.context_menu.unwrap();
+
+        let hit = c.hit(panel.center());
+        let kind = hit.map(|i| c.regions[i].kind.clone());
+        assert!(
+            matches!(kind, Some(RegionKind::MenuEntry { .. })),
+            "a point inside the panel should only ever reach the menu's own entries"
+        );
+    }
+
+    #[test]
+    fn a_point_inside_the_context_menu_is_not_canvas() {
+        let e = editor();
+        let at = kurbo::Point::new(200.0, 150.0);
+        let c = chrome_with_context_menu(&e, ContextTarget::Canvas, at);
+        let panel = c.context_menu.unwrap();
+        assert!(!c.is_over_canvas(panel.center()));
+    }
+
+    #[test]
+    fn a_page_tab_context_menu_offers_page_commands() {
+        let mut e = editor();
+        e.add_page();
+        let at = kurbo::Point::new(200.0, 150.0);
+        let c = chrome_with_context_menu(&e, ContextTarget::Page(0), at);
+        let labels: Vec<&str> = c
+            .regions
+            .iter()
+            .filter_map(|r| matches!(r.kind, RegionKind::MenuEntry { .. }).then_some(r.label.as_str()))
+            .collect();
+        assert!(labels.contains(&"Delete Page"));
+        assert!(labels.contains(&"Rename Page…"));
     }
 
     #[test]
@@ -2986,6 +3145,7 @@ mod tests {
             &ViewState::default(),
             None,
             Some(TabDrag { from: 0, pointer_x }),
+            None,
         );
 
         assert!(
@@ -3007,6 +3167,7 @@ mod tests {
             &ViewState::default(),
             None,
             Some(TabDrag { from: 0, pointer_x }),
+            None,
         );
         assert!(!c.regions.iter().any(|r| r.kind == RegionKind::DropMarker));
     }
@@ -3021,6 +3182,7 @@ mod tests {
             &ViewState::default(),
             None,
             Some(TabDrag { from: 0, pointer_x: 500.0 }),
+            None,
         );
         assert!(!c.regions.iter().any(|r| r.kind == RegionKind::DropMarker));
     }
@@ -3047,6 +3209,7 @@ mod tests {
                     &ViewState::default(),
                     None,
                     Some(drag),
+                    None,
                 );
                 let marker = c
                     .regions
@@ -3101,6 +3264,7 @@ mod tests {
             &ViewState::default(),
             None,
             Some(TabDrag { from: 0, pointer_x }),
+            None,
         );
         let marker = c
             .regions
@@ -3723,7 +3887,7 @@ mod tests {
 
     fn chrome_with_settings(e: &Editor, settings: crate::settings::Settings) -> Chrome {
         let view = ViewState { settings, settings_open: true, ..Default::default() };
-        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None)
+        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None, None)
     }
 
     fn settings_chrome(e: &Editor) -> Chrome {
@@ -3766,7 +3930,7 @@ mod tests {
         let e = editor();
         let view = ViewState { settings_open: true, ..Default::default() };
         for size in [Vec2::new(300.0, 240.0), Vec2::new(120.0, 120.0)] {
-            let c = Chrome::build_for(size, &e, &Metrics::default(), &view, None, None);
+            let c = Chrome::build_for(size, &e, &Metrics::default(), &view, None, None, None);
             let sheet = c.settings_sheet.expect("a sheet");
             assert!(sheet.x0 >= -0.01 && sheet.x1 <= size.x + 0.01, "{size:?}: {sheet:?}");
             assert!(sheet.y0 >= -0.01 && sheet.y1 <= size.y + 0.01, "{size:?}: {sheet:?}");
@@ -3893,7 +4057,7 @@ mod tests {
         for size in [window(), Vec2::new(900.0, 560.0), Vec2::new(640.0, 480.0)] {
             let e = editor();
             let view = ViewState { settings_open: true, ..Default::default() };
-            let c = Chrome::build_for(size, &e, &Metrics::default(), &view, None, None);
+            let c = Chrome::build_for(size, &e, &Metrics::default(), &view, None, None, None);
             let sheet = c.settings_sheet.unwrap();
 
             for region in settings_regions(&c) {
@@ -3915,9 +4079,16 @@ mod tests {
         let e = editor();
         let view = ViewState { settings_open: true, ..Default::default() };
 
-        let full = Chrome::build_for(window(), &e, &Metrics::default(), &view, None, None);
-        let short =
-            Chrome::build_for(Vec2::new(900.0, 420.0), &e, &Metrics::default(), &view, None, None);
+        let full = Chrome::build_for(window(), &e, &Metrics::default(), &view, None, None, None);
+        let short = Chrome::build_for(
+            Vec2::new(900.0, 420.0),
+            &e,
+            &Metrics::default(),
+            &view,
+            None,
+            None,
+            None,
+        );
 
         assert!(
             settings_choices(&short).len() < settings_choices(&full).len(),

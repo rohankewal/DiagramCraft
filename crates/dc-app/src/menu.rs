@@ -18,7 +18,7 @@
 
 use crate::editor::{Align, Editor, SelectBy, TextToggle, Tool};
 use crate::settings::Settings;
-use crate::ui::UiAction;
+use crate::ui::{ContextTarget, UiAction};
 use dc_model::{ShapeLibrary, ShapeType};
 
 /// The view-level state the menus reflect, which lives in the window layer
@@ -428,6 +428,92 @@ fn view_menu(editor: &Editor, view: &ViewState) -> Menu {
             ),
             MenuItem::separator(),
             MenuItem::check("Dark Theme", "", UiAction::ToggleTheme, view.settings.dark_theme),
+        ],
+    }
+}
+
+/// The right-click menu for whatever was under the pointer.
+///
+/// Lucidchart's context menu changes with what you click: a shape or a
+/// selection gets the commands that act on it, blank canvas gets paste and
+/// view commands, and a page tab gets the commands that act on the page it
+/// names rather than on the current selection.
+pub fn context_menu(editor: &Editor, target: ContextTarget) -> Menu {
+    match target {
+        ContextTarget::Canvas if editor.selection.is_empty() => canvas_context_menu(),
+        ContextTarget::Canvas => selection_context_menu(editor),
+        ContextTarget::Page(page) => page_context_menu(editor, page),
+    }
+}
+
+/// A right click on blank canvas: nothing is selected, so only the commands
+/// that do not need a selection make sense.
+fn canvas_context_menu() -> Menu {
+    Menu {
+        title: String::new(),
+        items: vec![
+            MenuItem::new("Paste", "⌘V", UiAction::Paste),
+            MenuItem::separator(),
+            MenuItem::new("Select All", "⌘A", UiAction::SelectAll),
+            MenuItem::separator(),
+            MenuItem::new("Zoom In", "⌘+", UiAction::ZoomIn),
+            MenuItem::new("Zoom Out", "⌘-", UiAction::ZoomOut),
+            MenuItem::new("Zoom to Fit", "⌘1", UiAction::ZoomFit),
+            MenuItem::new("Actual Size", "⌘0", UiAction::ActualSize),
+        ],
+    }
+}
+
+/// A right click on a shape, line, or multi-selection: `select_for_context_menu`
+/// has already settled what the click means, so every command here has
+/// something to act on.
+fn selection_context_menu(editor: &Editor) -> Menu {
+    let several = editor.selection.len() >= 2;
+
+    Menu {
+        title: String::new(),
+        items: vec![
+            MenuItem::new("Cut", "⌘X", UiAction::Cut),
+            MenuItem::new("Copy", "⌘C", UiAction::Copy),
+            MenuItem::new("Paste", "⌘V", UiAction::Paste),
+            MenuItem::new("Duplicate", "⌘D", UiAction::Duplicate),
+            MenuItem::new("Delete", "Del", UiAction::Delete),
+            MenuItem::separator(),
+            MenuItem::new("Copy Style", "Alt ⌘C", UiAction::CopyStyle),
+            MenuItem::new("Paste Style", "Alt ⌘V", UiAction::PasteStyle)
+                .enabled_when(editor.has_copied_style()),
+            MenuItem::separator(),
+            MenuItem::new("Edit Label", "Enter", UiAction::EditLabel),
+            MenuItem::separator(),
+            MenuItem::new("Bring to Front", "Shift ⌘]", UiAction::BringToFront),
+            MenuItem::new("Bring Forward", "⌘]", UiAction::BringForward),
+            MenuItem::new("Send Backward", "⌘[", UiAction::SendBackward),
+            MenuItem::new("Send to Back", "Shift ⌘[", UiAction::SendToBack),
+            MenuItem::separator(),
+            MenuItem::new("Rotate Left", "", UiAction::Rotate(-90.0)),
+            MenuItem::new("Rotate Right", "", UiAction::Rotate(90.0)),
+            MenuItem::new("Flip Horizontal", "", UiAction::Flip(true)),
+            MenuItem::new("Flip Vertical", "", UiAction::Flip(false)),
+            MenuItem::separator(),
+            MenuItem::new("Group", "⌘G", UiAction::Group).enabled_when(several),
+            MenuItem::new("Ungroup", "Shift ⌘G", UiAction::Ungroup)
+                .enabled_when(editor.selection_is_grouped()),
+        ],
+    }
+}
+
+/// A right click on a page tab: the commands act on that page, whether or
+/// not it is the one currently showing.
+fn page_context_menu(editor: &Editor, page: usize) -> Menu {
+    Menu {
+        title: String::new(),
+        items: vec![
+            MenuItem::new("New Page", "", UiAction::AddPage),
+            MenuItem::new("Duplicate Page", "", UiAction::DuplicatePage(page)),
+            MenuItem::new("Rename Page…", "", UiAction::RenamePage(page)),
+            MenuItem::separator(),
+            MenuItem::new("Delete Page", "", UiAction::DeletePage(page))
+                .enabled_when(editor.document().pages.len() > 1),
         ],
     }
 }
@@ -909,6 +995,89 @@ mod tests {
                     menu.title
                 );
             }
+        }
+    }
+
+    // --------------------------------------------------------- context menu
+
+    #[test]
+    fn blank_canvas_offers_paste_and_view_commands_but_nothing_about_a_selection() {
+        let e = editor();
+        let menu = context_menu(&e, ContextTarget::Canvas);
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Paste"));
+        assert!(labels.contains(&"Select All"));
+        assert!(labels.contains(&"Zoom to Fit"));
+        assert!(!labels.contains(&"Delete"), "nothing is selected");
+        assert!(!labels.contains(&"Cut"));
+    }
+
+    #[test]
+    fn a_shape_under_the_click_offers_the_commands_that_act_on_it() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        e.selection = vec![id];
+        let menu = context_menu(&e, ContextTarget::Canvas);
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["Cut", "Copy", "Paste", "Duplicate", "Delete", "Bring to Front", "Group"] {
+            assert!(labels.contains(&expected), "missing {expected:?}");
+        }
+    }
+
+    #[test]
+    fn group_is_only_offered_for_two_or_more() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        e.selection = vec![id];
+        let menu = context_menu(&e, ContextTarget::Canvas);
+        let group = menu.items.iter().find(|i| i.label == "Group").unwrap();
+        assert!(!group.enabled, "one shape cannot be grouped with itself");
+    }
+
+    #[test]
+    fn a_page_tab_offers_page_commands_regardless_of_selection() {
+        let mut e = editor();
+        e.add_page();
+        let menu = context_menu(&e, ContextTarget::Page(0));
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Duplicate Page"));
+        assert!(labels.contains(&"Rename Page…"));
+        let delete = menu.items.iter().find(|i| i.label == "Delete Page").unwrap();
+        assert!(delete.enabled, "a second page exists, so the first can go");
+    }
+
+    #[test]
+    fn the_only_page_cannot_be_deleted_from_its_context_menu() {
+        let e = editor();
+        let menu = context_menu(&e, ContextTarget::Page(0));
+        let delete = menu.items.iter().find(|i| i.label == "Delete Page").unwrap();
+        assert!(!delete.enabled);
+    }
+
+    #[test]
+    fn every_context_menu_follows_the_same_shape_rules_as_the_bar_menus() {
+        let e = editor();
+        let mut selected = editor();
+        let id = selected.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        selected.selection = vec![id];
+
+        for menu in [
+            context_menu(&e, ContextTarget::Canvas),
+            context_menu(&selected, ContextTarget::Canvas),
+            context_menu(&e, ContextTarget::Page(0)),
+        ] {
+            assert!(!menu.items.is_empty());
+            assert!(!menu.items.first().unwrap().is_separator());
+            assert!(!menu.items.last().unwrap().is_separator());
+            for pair in menu.items.windows(2) {
+                assert!(!(pair[0].is_separator() && pair[1].is_separator()));
+            }
+            for entry in &menu.items {
+                if !entry.is_separator() {
+                    assert_ne!(entry.action, UiAction::NoOp, "{} does nothing", entry.label);
+                }
+            }
+            assert!(menu.items.iter().any(|i| i.is_clickable()));
         }
     }
 }
