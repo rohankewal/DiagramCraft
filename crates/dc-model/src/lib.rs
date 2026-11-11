@@ -33,7 +33,7 @@ pub use document::{
 pub use geom::{BoundingBox, Point, RelPoint};
 pub use markup::{ParsedText, TextRun};
 pub use line::{Endpoint, EndpointStyle, LabelSide, Line, LineLabel, LineType};
-pub use shape::{CloudVendor, ImageRef, Shape, ShapeLibrary, ShapeType, StarShape};
+pub use shape::{Action, CloudVendor, CustomDataEntry, ImageRef, Shape, ShapeLibrary, ShapeType, StarShape};
 pub use style::{
     Fill, ImageScale, Stroke, StrokeStyle, Style, Text, TextAlign, TextStyle, VerticalAlign,
 };

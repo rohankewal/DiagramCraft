@@ -322,6 +322,55 @@ impl App {
         }
     }
 
+    /// Moves Next (`delta == 1`) or Previous (`delta == -1`) among the
+    /// current query's matches, wrapping around either end.
+    fn step_find_match(&mut self, delta: i64) {
+        let matches = self.editor.find_matches(&self.view.find_query);
+        if matches.is_empty() {
+            return;
+        }
+        let len = matches.len() as i64;
+        let current = self.view.find_match_index as i64;
+        let next = ((current + delta) % len + len) % len;
+        self.view.find_match_index = next as usize;
+        self.editor.select_and_frame(&matches[self.view.find_match_index]);
+    }
+
+    /// Applies the typed link text to the selection and leaves the field.
+    /// An empty field removes the link rather than setting an empty URL.
+    fn commit_link_edit(&mut self) {
+        let url = self.view.link_edit.trim();
+        if url.is_empty() {
+            self.editor.clear_link();
+        } else {
+            self.editor.set_link_url(url);
+        }
+        self.view.link_edit_focused = false;
+    }
+
+    /// Leaves the field without changing the shape's link.
+    fn cancel_link_edit(&mut self) {
+        self.view.link_edit_focused = false;
+    }
+
+    /// Applies the typed text to whichever custom-data field was focused.
+    fn commit_custom_data_edit(&mut self) {
+        match self.view.custom_data_focus.take() {
+            Some(crate::ui::CustomDataFocus::Key(i)) => {
+                self.editor.set_custom_data_key(i, &self.view.custom_data_edit);
+            }
+            Some(crate::ui::CustomDataFocus::Value(i)) => {
+                self.editor.set_custom_data_value(i, &self.view.custom_data_edit);
+            }
+            None => {}
+        }
+    }
+
+    /// Leaves the field without changing the entry.
+    fn cancel_custom_data_edit(&mut self) {
+        self.view.custom_data_focus = None;
+    }
+
     // ------------------------------------------------------------- rendering
 
     fn render(&mut self) {
@@ -612,6 +661,57 @@ impl App {
         }
 
         if button == MouseButton::Left {
+            // Clicking anything other than the search field itself moves
+            // focus away from it, the same way a native text field blurs.
+            if self.view.palette_search_focused {
+                let still_the_field = chrome
+                    .hit(self.pointer)
+                    .is_some_and(|i| chrome.regions[i].action == UiAction::FocusPaletteSearch);
+                if !still_the_field {
+                    self.view.palette_search_focused = false;
+                }
+            }
+
+            // A click away from the link field commits it, the way leaving
+            // any other field does.
+            if self.view.link_edit_focused {
+                let still_the_field = chrome
+                    .hit(self.pointer)
+                    .is_some_and(|i| chrome.regions[i].action == UiAction::FocusLinkField);
+                if !still_the_field {
+                    self.commit_link_edit();
+                }
+            }
+
+            // Same deal for whichever custom-data field is focused: clicking
+            // a different one commits this one before the new one takes over.
+            if let Some(focus) = self.view.custom_data_focus {
+                let expected = match focus {
+                    crate::ui::CustomDataFocus::Key(i) => UiAction::FocusCustomDataKey(i),
+                    crate::ui::CustomDataFocus::Value(i) => UiAction::FocusCustomDataValue(i),
+                };
+                let still_the_field =
+                    chrome.hit(self.pointer).is_some_and(|i| chrome.regions[i].action == expected);
+                if !still_the_field {
+                    self.commit_custom_data_edit();
+                }
+            }
+
+            // The find fields have no staged value to commit, just focus
+            // to drop on a click elsewhere.
+            if self.view.find_query_focused
+                && !chrome.hit(self.pointer).is_some_and(|i| chrome.regions[i].action == UiAction::FocusFindQuery)
+            {
+                self.view.find_query_focused = false;
+            }
+            if self.view.find_replacement_focused
+                && !chrome
+                    .hit(self.pointer)
+                    .is_some_and(|i| chrome.regions[i].action == UiAction::FocusFindReplacement)
+            {
+                self.view.find_replacement_focused = false;
+            }
+
             // A click inside an open page-title edit drives its caret.
             if self.editor.editing_page_title().is_some() {
                 let inside = self
@@ -807,6 +907,116 @@ impl App {
     /// what must be inserted: deriving characters from key codes mishandles
     /// dead keys, alternate layouts, and shifted symbols.
     fn on_key(&mut self, key: &Key, state: ElementState, text: Option<&str>) {
+        // The palette search is a plain field, not a document label, so it
+        // takes keystrokes without going anywhere near `TextEdit`.
+        if self.view.palette_search_focused {
+            if state == ElementState::Pressed {
+                match key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.view.palette_search.clear();
+                        self.view.palette_search_focused = false;
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        self.view.palette_search.pop();
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.view.palette_search_focused = false;
+                    }
+                    _ => {
+                        if let Some(text) = text {
+                            self.view.palette_search.push_str(text);
+                        }
+                    }
+                }
+                self.request_redraw();
+            }
+            return;
+        }
+
+        // Same deal for the link field: a plain string, not a label.
+        if self.view.link_edit_focused {
+            if state == ElementState::Pressed {
+                match key {
+                    Key::Named(NamedKey::Escape) => self.cancel_link_edit(),
+                    Key::Named(NamedKey::Backspace) => {
+                        self.view.link_edit.pop();
+                    }
+                    Key::Named(NamedKey::Enter) => self.commit_link_edit(),
+                    _ => {
+                        if let Some(text) = text {
+                            self.view.link_edit.push_str(text);
+                        }
+                    }
+                }
+                self.request_redraw();
+            }
+            return;
+        }
+
+        if self.view.custom_data_focus.is_some() {
+            if state == ElementState::Pressed {
+                match key {
+                    Key::Named(NamedKey::Escape) => self.cancel_custom_data_edit(),
+                    Key::Named(NamedKey::Backspace) => {
+                        self.view.custom_data_edit.pop();
+                    }
+                    Key::Named(NamedKey::Enter) => self.commit_custom_data_edit(),
+                    _ => {
+                        if let Some(text) = text {
+                            self.view.custom_data_edit.push_str(text);
+                        }
+                    }
+                }
+                self.request_redraw();
+            }
+            return;
+        }
+
+        // The find query is live, like the palette search: there is no
+        // separate "applied" value for it to diverge from, so Enter steps
+        // to the next match instead of committing anything.
+        if self.view.find_query_focused {
+            if state == ElementState::Pressed {
+                match key {
+                    Key::Named(NamedKey::Escape) => self.view.find_query_focused = false,
+                    Key::Named(NamedKey::Backspace) => {
+                        self.view.find_query.pop();
+                        self.view.find_match_index = 0;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.step_find_match(if self.mods.shift { -1 } else { 1 });
+                    }
+                    _ => {
+                        if let Some(text) = text {
+                            self.view.find_query.push_str(text);
+                            self.view.find_match_index = 0;
+                        }
+                    }
+                }
+                self.request_redraw();
+            }
+            return;
+        }
+
+        if self.view.find_replacement_focused {
+            if state == ElementState::Pressed {
+                match key {
+                    Key::Named(NamedKey::Escape) => self.view.find_replacement_focused = false,
+                    Key::Named(NamedKey::Backspace) => {
+                        self.view.find_replacement.pop();
+                    }
+                    Key::Named(NamedKey::Enter) => self.perform(UiAction::ReplaceCurrentMatch),
+                    _ => {
+                        if let Some(text) = text {
+                            self.view.find_replacement.push_str(text);
+                        }
+                    }
+                }
+                self.request_redraw();
+            }
+            return;
+        }
+
         if self.editor.is_editing() {
             if state == ElementState::Pressed && self.on_key_while_editing(key, text) {
                 self.update_title();
@@ -887,6 +1097,7 @@ impl App {
                     (true, "o") => self.perform(UiAction::Open),
                     (true, "n") => self.perform(UiAction::NewDocument),
                     (true, "a") => self.editor.select_all(),
+                    (true, "f") => self.perform(UiAction::ToggleFind),
                     (true, "d") => self.editor.duplicate_selection(),
                     (true, "b") => {
                         self.editor.toggle_text_style(crate::editor::TextToggle::Bold)
@@ -941,6 +1152,7 @@ impl App {
                     (false, "p") => {
                         self.editor.tool = Tool::Shape(dc_model::ShapeType::Process);
                     }
+                    (false, "f") => self.editor.tool = Tool::Freehand,
                     _ => {}
                 }
             }
@@ -1118,6 +1330,16 @@ impl App {
                 self.sync_images();
             }
 
+            UiAction::OpenTemplateGallery => self.view.template_gallery_open = true,
+            UiAction::CloseTemplateGallery => self.view.template_gallery_open = false,
+            UiAction::NewFromTemplate(index) => {
+                if let Some(t) = crate::templates::ALL.get(index) {
+                    self.editor.new_document_from_template((t.build)(), t.name);
+                    self.sync_images();
+                }
+                self.view.template_gallery_open = false;
+            }
+
             UiAction::Open => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Diagram", &["lucid"])
@@ -1219,6 +1441,81 @@ impl App {
             UiAction::SelectMatching(by) => self.editor.select_matching(by),
 
             UiAction::SelectLibrary(library) => self.view.library = library,
+            UiAction::FocusPaletteSearch => self.view.palette_search_focused = true,
+
+            UiAction::FocusLinkField => {
+                self.view.link_edit = match self.editor.selection_link() {
+                    Some(dc_model::Action::Url { url, .. }) => url,
+                    _ => String::new(),
+                };
+                self.view.link_edit_focused = true;
+            }
+            UiAction::ClearLink => {
+                self.editor.clear_link();
+                self.view.link_edit.clear();
+                self.view.link_edit_focused = false;
+            }
+            UiAction::OpenLink => match self.editor.selection_link() {
+                Some(dc_model::Action::Url { url, .. }) => open_url(&url),
+                Some(dc_model::Action::GotoPage { page_id }) => {
+                    if let Some(index) =
+                        self.editor.document().pages.iter().position(|p| p.id == page_id)
+                    {
+                        self.editor.select_page(index);
+                    }
+                }
+                _ => {}
+            },
+
+            UiAction::AddCustomData => self.editor.add_custom_data(),
+            UiAction::RemoveCustomData(index) => {
+                self.editor.remove_custom_data(index);
+                if self.view.custom_data_focus == Some(crate::ui::CustomDataFocus::Key(index))
+                    || self.view.custom_data_focus == Some(crate::ui::CustomDataFocus::Value(index))
+                {
+                    self.view.custom_data_focus = None;
+                    self.view.custom_data_edit.clear();
+                }
+            }
+            UiAction::FocusCustomDataKey(index) => {
+                let current = self.editor.selection_custom_data();
+                self.view.custom_data_edit = current.get(index).map(|e| e.key.clone()).unwrap_or_default();
+                self.view.custom_data_focus = Some(crate::ui::CustomDataFocus::Key(index));
+            }
+            UiAction::FocusCustomDataValue(index) => {
+                let current = self.editor.selection_custom_data();
+                self.view.custom_data_edit = current.get(index).map(|e| e.value.clone()).unwrap_or_default();
+                self.view.custom_data_focus = Some(crate::ui::CustomDataFocus::Value(index));
+            }
+
+            UiAction::ToggleLayersPanel => {
+                self.view.layers_panel_open = !self.view.layers_panel_open;
+            }
+            UiAction::AddLayer => {
+                self.editor.add_layer();
+            }
+            UiAction::DeleteLayer(id) => self.editor.delete_layer(&id),
+            UiAction::ToggleLayerVisibility(id) => self.editor.toggle_layer_visibility(&id),
+            UiAction::ToggleLayerLock(id) => self.editor.toggle_layer_lock(&id),
+            UiAction::MoveSelectionToLayer(id) => self.editor.move_selection_to_layer(&id),
+
+            UiAction::ToggleFind => {
+                self.view.find_open = !self.view.find_open;
+                if !self.view.find_open {
+                    self.view.find_query_focused = false;
+                    self.view.find_replacement_focused = false;
+                }
+            }
+            UiAction::FocusFindQuery => self.view.find_query_focused = true,
+            UiAction::FocusFindReplacement => self.view.find_replacement_focused = true,
+            UiAction::FindNext => self.step_find_match(1),
+            UiAction::FindPrevious => self.step_find_match(-1),
+            UiAction::ReplaceCurrentMatch => {
+                let matches = self.editor.find_matches(&self.view.find_query);
+                if let Some(id) = matches.get(self.view.find_match_index) {
+                    self.editor.replace_in(id, &self.view.find_query, &self.view.find_replacement);
+                }
+            }
 
             UiAction::Align(how) => self.editor.align_selection(how),
             UiAction::Distribute(horizontal) => self.editor.distribute_selection(horizontal),
@@ -1235,6 +1532,7 @@ impl App {
                 self.editor.zoom_by(1.0 / step);
             }
             UiAction::ZoomFit => self.editor.zoom_to_fit(),
+            UiAction::ZoomToSelection => self.editor.zoom_to_selection(),
             UiAction::ActualSize => self.editor.reset_zoom(),
 
             // The View menu's toggles are the same preferences the settings
@@ -1301,6 +1599,7 @@ impl App {
             UiAction::SetTextAlign(align) => self.editor.set_text_align(align),
             UiAction::SetVerticalAlign(align) => self.editor.set_vertical_align(align),
             UiAction::SetTextColor(color) => self.editor.set_text_color(color),
+            UiAction::SetFontFamily(family) => self.editor.set_font_family(family),
             UiAction::EditLabel => {
                 let mut cx = Self::text_ctx(&mut self.document_renderer);
                 self.editor.begin_text_edit_on_selection(&mut cx);
@@ -1445,7 +1744,8 @@ impl App {
             // Everything that leaves the document: finish the label first, so
             // what was typed is in what gets written or drawn.
             UiAction::Save | UiAction::SaveAs | UiAction::ExportPng | UiAction::Open
-            | UiAction::ImportVsdx | UiAction::NewDocument => {
+            | UiAction::ImportVsdx | UiAction::NewDocument | UiAction::OpenTemplateGallery
+            | UiAction::NewFromTemplate(_) => {
                 self.editor.commit_text_edit();
                 false
             }
@@ -1467,6 +1767,20 @@ impl App {
         self.sync_images();
         self.sync_canvas_viewport();
     }
+}
+
+/// Opens a URL in the system's default browser.
+///
+/// Shelled out per platform rather than pulled in as a dependency — the
+/// same reasoning `native_menu.rs` uses for platform differences elsewhere
+/// in this app.
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
 }
 
 /// What the Help menu's shortcut command puts in the status bar.
@@ -2203,6 +2517,479 @@ mod tests {
         a.on_key_compat(&Key::Named(NamedKey::Escape), ElementState::Pressed);
         assert!(a.context_menu.is_none());
         assert_eq!(a.editor.selection, vec![id], "the selection should survive");
+    }
+
+    // ------------------------------------------------------ palette search
+
+    fn search_field_rect(a: &App) -> kurbo::Rect {
+        a.chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::FocusPaletteSearch)
+            .expect("a search field")
+            .rect
+    }
+
+    #[test]
+    fn clicking_the_search_field_focuses_it_and_typing_fills_it() {
+        let mut a = app();
+        a.pointer = search_field_rect(&a).center();
+        a.on_pointer_down(MouseButton::Left);
+        assert!(a.view.palette_search_focused);
+
+        for c in ['s', 't', 'a', 'r'] {
+            a.on_key_compat(&Key::Character(c.to_string().into()), ElementState::Pressed);
+        }
+        assert_eq!(a.view.palette_search, "star");
+    }
+
+    #[test]
+    fn backspace_removes_the_last_character() {
+        let mut a = app();
+        a.view.palette_search_focused = true;
+        a.view.palette_search = "star".into();
+        a.on_key_compat(&Key::Named(NamedKey::Backspace), ElementState::Pressed);
+        assert_eq!(a.view.palette_search, "sta");
+    }
+
+    #[test]
+    fn escape_clears_the_search_and_unfocuses_it() {
+        let mut a = app();
+        a.view.palette_search_focused = true;
+        a.view.palette_search = "star".into();
+        a.on_key_compat(&Key::Named(NamedKey::Escape), ElementState::Pressed);
+        assert!(a.view.palette_search.is_empty());
+        assert!(!a.view.palette_search_focused);
+    }
+
+    #[test]
+    fn enter_unfocuses_but_keeps_the_query() {
+        let mut a = app();
+        a.view.palette_search_focused = true;
+        a.view.palette_search = "star".into();
+        a.on_key_compat(&Key::Named(NamedKey::Enter), ElementState::Pressed);
+        assert_eq!(a.view.palette_search, "star");
+        assert!(!a.view.palette_search_focused);
+    }
+
+    #[test]
+    fn clicking_elsewhere_unfocuses_the_search_field_but_keeps_its_text() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        a.view.palette_search_focused = true;
+        a.view.palette_search = "star".into();
+
+        a.pointer = a.chrome().layout.canvas.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(!a.view.palette_search_focused);
+        assert_eq!(a.view.palette_search, "star");
+    }
+
+    #[test]
+    fn typed_characters_do_not_leak_into_shortcuts_while_searching() {
+        // Bare "c" normally selects the Connector tool; if it did that here
+        // too, the key would have reached the shortcut dispatcher instead
+        // of landing only in the query.
+        let mut a = app();
+        a.view.palette_search_focused = true;
+        a.editor.tool = Tool::Select;
+        a.on_key_compat(&Key::Character("c".into()), ElementState::Pressed);
+        assert_eq!(a.view.palette_search, "c");
+        assert_eq!(a.editor.tool, Tool::Select, "a shortcut must not have fired");
+    }
+
+    // ------------------------------------------------------------ link field
+
+    fn link_field_rect(a: &App) -> kurbo::Rect {
+        a.chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::FocusLinkField)
+            .expect("a link field")
+            .rect
+    }
+
+    #[test]
+    fn clicking_the_link_field_focuses_it_and_typing_fills_it() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+
+        a.pointer = link_field_rect(&a).center();
+        a.on_pointer_down(MouseButton::Left);
+        assert!(a.view.link_edit_focused);
+
+        for c in "https://x".chars() {
+            a.on_key_compat(&Key::Character(c.to_string().into()), ElementState::Pressed);
+        }
+        assert_eq!(a.view.link_edit, "https://x");
+    }
+
+    #[test]
+    fn enter_commits_the_typed_link() {
+        let mut a = app();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+        a.view.link_edit_focused = true;
+        a.view.link_edit = "https://example.com".into();
+
+        a.on_key_compat(&Key::Named(NamedKey::Enter), ElementState::Pressed);
+
+        assert!(!a.view.link_edit_focused);
+        assert_eq!(
+            a.editor.selection_link(),
+            Some(dc_model::Action::Url { url: "https://example.com".into(), new_window: None })
+        );
+    }
+
+    #[test]
+    fn escape_cancels_without_touching_the_link() {
+        let mut a = app();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+        a.editor.set_link_url("https://kept.example");
+        a.view.link_edit_focused = true;
+        a.view.link_edit = "https://discarded.example".into();
+
+        a.on_key_compat(&Key::Named(NamedKey::Escape), ElementState::Pressed);
+
+        assert!(!a.view.link_edit_focused);
+        assert_eq!(
+            a.editor.selection_link(),
+            Some(dc_model::Action::Url { url: "https://kept.example".into(), new_window: None })
+        );
+    }
+
+    #[test]
+    fn clicking_elsewhere_commits_the_link_field() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+        a.view.link_edit_focused = true;
+        a.view.link_edit = "https://example.com".into();
+
+        a.pointer = kurbo::Point::new(2.0, 2.0);
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(!a.view.link_edit_focused);
+        assert_eq!(
+            a.editor.selection_link(),
+            Some(dc_model::Action::Url { url: "https://example.com".into(), new_window: None })
+        );
+    }
+
+    #[test]
+    fn an_empty_field_committed_removes_the_link() {
+        let mut a = app();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+        a.editor.set_link_url("https://example.com");
+        a.view.link_edit_focused = true;
+        a.view.link_edit = String::new();
+
+        a.on_key_compat(&Key::Named(NamedKey::Enter), ElementState::Pressed);
+        assert_eq!(a.editor.selection_link(), None);
+    }
+
+    #[test]
+    fn clicking_remove_link_clears_it() {
+        let mut a = app();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+        a.editor.set_link_url("https://example.com");
+
+        let remove = a
+            .chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::ClearLink)
+            .expect("a Remove Link button")
+            .rect;
+        a.pointer = remove.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert_eq!(a.editor.selection_link(), None);
+    }
+
+    // ------------------------------------------------------- custom data
+
+    #[test]
+    fn clicking_add_field_then_typing_a_key_and_value() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+
+        let add = a.chrome().regions.iter().find(|r| r.action == UiAction::AddCustomData).unwrap().rect;
+        a.pointer = add.center();
+        a.on_pointer_down(MouseButton::Left);
+        assert_eq!(a.editor.selection_custom_data().len(), 1);
+
+        let key_rect =
+            a.chrome().regions.iter().find(|r| r.action == UiAction::FocusCustomDataKey(0)).unwrap().rect;
+        a.pointer = key_rect.center();
+        a.on_pointer_down(MouseButton::Left);
+        assert_eq!(a.view.custom_data_focus, Some(crate::ui::CustomDataFocus::Key(0)));
+        for c in "owner".chars() {
+            a.on_key_compat(&Key::Character(c.to_string().into()), ElementState::Pressed);
+        }
+        a.on_key_compat(&Key::Named(NamedKey::Enter), ElementState::Pressed);
+
+        assert_eq!(a.editor.selection_custom_data()[0].key, "owner");
+        assert!(a.view.custom_data_focus.is_none());
+    }
+
+    #[test]
+    fn clicking_a_different_field_commits_the_one_before_it() {
+        let mut a = app();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+        a.editor.add_custom_data();
+        a.view.custom_data_focus = Some(crate::ui::CustomDataFocus::Key(0));
+        a.view.custom_data_edit = "owner".into();
+
+        let value_rect = a
+            .chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::FocusCustomDataValue(0))
+            .unwrap()
+            .rect;
+        a.pointer = value_rect.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert_eq!(a.editor.selection_custom_data()[0].key, "owner", "the key should have been saved");
+        assert_eq!(a.view.custom_data_focus, Some(crate::ui::CustomDataFocus::Value(0)));
+    }
+
+    #[test]
+    fn removing_a_field_clears_its_focus_if_it_was_focused() {
+        let mut a = app();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        a.editor.selection = vec![id];
+        a.editor.add_custom_data();
+        a.view.custom_data_focus = Some(crate::ui::CustomDataFocus::Key(0));
+        a.view.custom_data_edit = "half-typed".into();
+
+        let remove =
+            a.chrome().regions.iter().find(|r| r.action == UiAction::RemoveCustomData(0)).unwrap().rect;
+        a.pointer = remove.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(a.editor.selection_custom_data().is_empty());
+        assert!(a.view.custom_data_focus.is_none());
+    }
+
+    // --------------------------------------------------------- layers panel
+
+    #[test]
+    fn toggling_the_layers_panel_from_the_view_menu() {
+        let mut a = app();
+        assert!(!a.view.layers_panel_open);
+        a.perform(UiAction::ToggleLayersPanel);
+        assert!(a.view.layers_panel_open);
+        a.perform(UiAction::ToggleLayersPanel);
+        assert!(!a.view.layers_panel_open);
+    }
+
+    #[test]
+    fn clicking_add_layer_creates_one() {
+        let mut a = app();
+        a.view.layers_panel_open = true;
+        assert!(a.editor.layers().is_empty());
+
+        let add = a.chrome().regions.iter().find(|r| r.action == UiAction::AddLayer).unwrap().rect;
+        a.pointer = add.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert_eq!(a.editor.layers().len(), 1);
+    }
+
+    #[test]
+    fn clicking_vis_and_lock_toggles_the_layer() {
+        let mut a = app();
+        a.view.layers_panel_open = true;
+        let id = a.editor.add_layer();
+
+        let vis_rect = a
+            .chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::ToggleLayerVisibility(id.clone()))
+            .unwrap()
+            .rect;
+        a.pointer = vis_rect.center();
+        a.on_pointer_down(MouseButton::Left);
+        assert!(!a.editor.layers()[0].is_visible());
+
+        let lock_rect = a
+            .chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::ToggleLayerLock(id.clone()))
+            .unwrap()
+            .rect;
+        a.pointer = lock_rect.center();
+        a.on_pointer_down(MouseButton::Left);
+        assert!(a.editor.layers()[0].is_locked());
+    }
+
+    #[test]
+    fn clicking_use_moves_the_selection_into_the_layer() {
+        let mut a = app();
+        a.view.layers_panel_open = true;
+        let id = a.editor.add_layer();
+        let shape = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        a.editor.selection = vec![shape.clone()];
+
+        let use_rect = a
+            .chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::MoveSelectionToLayer(id.clone()))
+            .unwrap()
+            .rect;
+        a.pointer = use_rect.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert_eq!(a.editor.layer_of(&shape).map(|l| l.id.clone()), Some(id));
+    }
+
+    #[test]
+    fn clicking_del_removes_the_layer() {
+        let mut a = app();
+        a.view.layers_panel_open = true;
+        let id = a.editor.add_layer();
+
+        let del_rect = a.chrome().regions.iter().find(|r| r.action == UiAction::DeleteLayer(id.clone())).unwrap().rect;
+        a.pointer = del_rect.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(a.editor.layers().is_empty());
+    }
+
+    #[test]
+    fn a_click_inside_the_empty_part_of_the_layers_panel_does_not_reach_the_canvas() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        a.view.layers_panel_open = true;
+        let before = a.editor.page().shapes().len();
+
+        let panel = a.chrome().layers_panel.expect("a layers panel");
+        a.pointer = kurbo::Point::new(panel.x0 + 4.0, panel.y1 - 4.0);
+        a.on_pointer_down(MouseButton::Left);
+        a.on_pointer_up();
+
+        assert_eq!(a.editor.page().shapes().len(), before, "nothing should have been drawn on the canvas");
+    }
+
+    // --------------------------------------------------------- find and replace
+
+    #[test]
+    fn toggling_find_from_the_edit_menu_or_shortcut() {
+        let mut a = app();
+        assert!(!a.view.find_open);
+        a.perform(UiAction::ToggleFind);
+        assert!(a.view.find_open);
+        a.perform(UiAction::ToggleFind);
+        assert!(!a.view.find_open);
+    }
+
+    #[test]
+    fn typing_a_query_and_stepping_through_matches() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        a.view.find_open = true;
+        let a_id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        a.editor.package.document.pages[0].shape_mut(&a_id).unwrap().text =
+            Some(dc_model::Text::new("Approval A"));
+        let b_id = a.editor.create_shape(
+            dc_model::ShapeType::Rectangle,
+            dc_model::BoundingBox::new(300.0, 0.0, 100.0, 40.0),
+        );
+        a.editor.package.document.pages[0].shape_mut(&b_id).unwrap().text =
+            Some(dc_model::Text::new("Approval B"));
+
+        let field = a.chrome().regions.iter().find(|r| r.action == UiAction::FocusFindQuery).unwrap().rect;
+        a.pointer = field.center();
+        a.on_pointer_down(MouseButton::Left);
+        assert!(a.view.find_query_focused);
+        for c in "approval".chars() {
+            a.on_key_compat(&Key::Character(c.to_string().into()), ElementState::Pressed);
+        }
+
+        a.on_key_compat(&Key::Named(NamedKey::Enter), ElementState::Pressed);
+        let first = a.editor.selection.clone();
+        assert_eq!(first.len(), 1);
+        assert!(first[0] == a_id || first[0] == b_id);
+
+        a.on_key_compat(&Key::Named(NamedKey::Enter), ElementState::Pressed);
+        let second = a.editor.selection.clone();
+        assert_ne!(first, second, "Next should move to the other match");
+
+        a.mods.shift = true;
+        a.on_key_compat(&Key::Named(NamedKey::Enter), ElementState::Pressed);
+        assert_eq!(a.editor.selection, first, "Shift-Enter should step backward again");
+    }
+
+    #[test]
+    fn clicking_replace_rewrites_the_current_match() {
+        let mut a = app();
+        let id = a
+            .editor
+            .create_shape(dc_model::ShapeType::Rectangle, dc_model::BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        a.editor.package.document.pages[0].shape_mut(&id).unwrap().text =
+            Some(dc_model::Text::new("Approval pending"));
+        a.view.find_open = true;
+        a.view.find_query = "approval".into();
+        a.view.find_replacement = "Sign-off".into();
+
+        let replace_rect =
+            a.chrome().regions.iter().find(|r| r.action == UiAction::ReplaceCurrentMatch).unwrap().rect;
+        a.pointer = replace_rect.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert_eq!(a.editor.page().shape(&id).unwrap().text_str(), "Sign-off pending");
+    }
+
+    #[test]
+    fn clicking_elsewhere_unfocuses_the_find_query() {
+        let mut a = app();
+        a.sync_canvas_viewport();
+        a.view.find_open = true;
+        a.view.find_query_focused = true;
+        a.view.find_query = "approval".into();
+
+        a.pointer = a.chrome().layout.canvas.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(!a.view.find_query_focused);
+        assert_eq!(a.view.find_query, "approval", "the query itself is not cleared by blurring");
     }
 
     // ------------------------------------------------ editing through keys
@@ -3076,6 +3863,58 @@ mod tests {
         a.perform(UiAction::NewDocument);
         assert_eq!(a.editor.document().units(), dc_model::Units::Cm);
         assert_eq!(a.editor.page_size_name(), "a4");
+    }
+
+    // ------------------------------------------------------ template gallery
+
+    #[test]
+    fn opening_the_gallery_from_the_menu() {
+        let mut a = app_with_window_menus();
+        click_menu_title(&mut a, 0); // File
+        click_menu_entry(&mut a, "New from Template…");
+        assert!(a.view.template_gallery_open);
+    }
+
+    #[test]
+    fn clicking_a_template_loads_it_and_closes_the_gallery() {
+        let mut a = app();
+        a.view.template_gallery_open = true;
+
+        let row = a
+            .chrome()
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::NewFromTemplate(0))
+            .unwrap()
+            .rect;
+        a.pointer = row.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(!a.view.template_gallery_open);
+        assert!(!a.editor.page().shapes().is_empty(), "the template's shapes should be loaded");
+    }
+
+    #[test]
+    fn clicking_cancel_closes_the_gallery_without_changing_the_document() {
+        let mut a = app();
+        let before = a.editor.page().shapes().len();
+        a.view.template_gallery_open = true;
+
+        let cancel = a.chrome().regions.iter().find(|r| r.label == "Cancel").unwrap().rect;
+        a.pointer = cancel.center();
+        a.on_pointer_down(MouseButton::Left);
+
+        assert!(!a.view.template_gallery_open);
+        assert_eq!(a.editor.page().shapes().len(), before);
+    }
+
+    #[test]
+    fn clicking_the_scrim_closes_the_gallery() {
+        let mut a = app();
+        a.view.template_gallery_open = true;
+        a.pointer = kurbo::Point::new(2.0, 2.0);
+        a.on_pointer_down(MouseButton::Left);
+        assert!(!a.view.template_gallery_open);
     }
 
     #[test]

@@ -242,6 +242,10 @@ impl Layer {
     pub fn is_locked(&self) -> bool {
         self.locked.unwrap_or(false)
     }
+
+    pub fn items(&self) -> &[String] {
+        self.items.as_deref().unwrap_or(&[])
+    }
 }
 
 /// A single page of a document.

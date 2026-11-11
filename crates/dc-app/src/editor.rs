@@ -28,6 +28,8 @@ pub enum Tool {
     Connector,
     /// Place a shape of this type.
     Shape(ShapeType),
+    /// Draw a freehand stroke.
+    Freehand,
 }
 
 impl Default for Tool {
@@ -84,6 +86,8 @@ enum Drag {
         start: Point,
         current: Point,
     },
+    /// Recording a pen stroke, in document coordinates.
+    Freehand { points: Vec<Point> },
     /// Dragging inside an active text edit to extend the selection.
     TextSelect,
 }
@@ -362,6 +366,20 @@ impl Editor {
             Some(Drag::Create { start, current, .. }) => {
                 (Some(BoundingBox::from_corners(*start, *current)), None)
             }
+            // The real stroke only exists once the drag ends, so the bounds
+            // it will land in stand in for a preview, the same way a shape
+            // being dragged out shows its box rather than its final outline.
+            Some(Drag::Freehand { points }) if points.len() >= 2 => {
+                let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
+                let (mut max_x, mut max_y) = (f64::MIN, f64::MIN);
+                for p in points {
+                    min_x = min_x.min(p.x);
+                    min_y = min_y.min(p.y);
+                    max_x = max_x.max(p.x);
+                    max_y = max_y.max(p.y);
+                }
+                (Some(BoundingBox::new(min_x, min_y, max_x - min_x, max_y - min_y)), None)
+            }
             Some(Drag::Connector { from, current, .. }) => (None, Some((*from, *current))),
             _ => (None, None),
         };
@@ -438,6 +456,21 @@ impl Editor {
             ..Default::default()
         });
 
+        self.load_document(document);
+        self.status = "New document".into();
+    }
+
+    /// Replaces the open document with one built from a template, the same
+    /// way `new_document` replaces it with a blank one.
+    pub fn new_document_from_template(&mut self, document: Document, name: &str) {
+        self.load_document(document);
+        self.status = format!("New document from {name}");
+    }
+
+    /// The reset shared by starting a blank document and starting one from
+    /// a template: a fresh package with no selection, no undo history, and
+    /// the camera back at its default framing.
+    fn load_document(&mut self, document: Document) {
         self.package = LucidPackage::new(document);
         self.page_index = 0;
         self.selection.clear();
@@ -446,7 +479,6 @@ impl Editor {
         self.history.clear();
         self.drag = None;
         self.camera.reset();
-        self.status = "New document".into();
     }
 
     pub fn open_path(&mut self, path: impl AsRef<Path>) -> Result<(), dc_lucid::Error> {
@@ -600,6 +632,14 @@ impl Editor {
         }
     }
 
+    /// Frames the current selection, the same way `zoom_to_fit` frames the
+    /// page. Does nothing with no selection, rather than resetting the view.
+    pub fn zoom_to_selection(&mut self) {
+        if let Some(bounds) = self.selection_bounds() {
+            self.camera.fit(bounds.inflated(40.0), 24.0);
+        }
+    }
+
     pub fn zoom_by(&mut self, factor: f64) {
         let center = Point::new(self.camera.viewport.x / 2.0, self.camera.viewport.y / 2.0);
         self.camera.zoom_at(center, factor);
@@ -702,6 +742,10 @@ impl Editor {
 
             Tool::Shape(shape_type) => {
                 self.drag = Some(Drag::Create { shape_type, start: doc_point, current: doc_point });
+            }
+
+            Tool::Freehand => {
+                self.drag = Some(Drag::Freehand { points: vec![doc_point] });
             }
 
             Tool::Connector => {
@@ -863,6 +907,11 @@ impl Editor {
 
             Some(Drag::Create { shape_type, start, .. }) => {
                 self.drag = Some(Drag::Create { shape_type, start, current: doc_point });
+            }
+
+            Some(Drag::Freehand { mut points }) => {
+                points.push(doc_point);
+                self.drag = Some(Drag::Freehand { points });
             }
 
             Some(Drag::Connector { from_shape, from, .. }) => {
@@ -1069,6 +1118,29 @@ impl Editor {
                 };
                 self.create_shape(shape_type, box_);
                 self.tool = Tool::Select;
+            }
+
+            Some(Drag::Freehand { points }) => {
+                // Fewer than two points, or a stroke that never moved, is a
+                // stray click rather than a drawing — nothing is created,
+                // so the tool stays armed for another attempt.
+                let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
+                let (mut max_x, mut max_y) = (f64::MIN, f64::MIN);
+                for p in &points {
+                    min_x = min_x.min(p.x);
+                    min_y = min_y.min(p.y);
+                    max_x = max_x.max(p.x);
+                    max_y = max_y.max(p.y);
+                }
+                if points.len() >= 2 && (max_x - min_x).max(max_y - min_y) > 1.0 {
+                    let id = self.create_shape(
+                        ShapeType::FreehandDrawing,
+                        BoundingBox::new(min_x, min_y, max_x - min_x, max_y - min_y),
+                    );
+                    if let Some(shape) = self.page_mut().shape_mut(&id) {
+                        shape.points = Some(points);
+                    }
+                }
             }
 
             Some(Drag::Connector { from_shape, from, .. }) => {
@@ -2193,6 +2265,304 @@ impl Editor {
         self.copied_style.is_some()
     }
 
+    /// The id of the selection, when exactly one thing is selected.
+    fn single_selected_id(&self) -> Option<String> {
+        match self.selection.as_slice() {
+            [id] => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    /// The navigation action on the selected shape, if there is exactly one
+    /// shape selected and it has one.
+    pub fn selection_link(&self) -> Option<dc_model::Action> {
+        let id = self.single_selected_id()?;
+        let shape = self.page().shape(&id)?;
+        shape
+            .actions
+            .as_ref()?
+            .iter()
+            .find(|a| matches!(a, dc_model::Action::Url { .. } | dc_model::Action::GotoPage { .. }))
+            .cloned()
+    }
+
+    /// Sets the selected shape's link to a URL, replacing whatever
+    /// navigation action it had.
+    pub fn set_link_url(&mut self, url: &str) {
+        let Some(id) = self.single_selected_id() else {
+            return;
+        };
+        self.begin_change();
+        if let Some(shape) = self.page_mut().shape_mut(&id) {
+            let actions = shape.actions.get_or_insert_with(Vec::new);
+            actions.retain(|a| {
+                !matches!(a, dc_model::Action::Url { .. } | dc_model::Action::GotoPage { .. })
+            });
+            actions.push(dc_model::Action::Url { url: url.to_string(), new_window: None });
+        }
+    }
+
+    /// Removes the selected shape's link, if it has one.
+    pub fn clear_link(&mut self) {
+        let Some(id) = self.single_selected_id() else {
+            return;
+        };
+        self.begin_change();
+        if let Some(shape) = self.page_mut().shape_mut(&id) {
+            if let Some(actions) = shape.actions.as_mut() {
+                actions.retain(|a| {
+                    !matches!(a, dc_model::Action::Url { .. } | dc_model::Action::GotoPage { .. })
+                });
+                if actions.is_empty() {
+                    shape.actions = None;
+                }
+            }
+        }
+    }
+
+    /// The custom-data entries on the selected shape, when exactly one
+    /// shape is selected.
+    pub fn selection_custom_data(&self) -> Vec<dc_model::CustomDataEntry> {
+        let Some(id) = self.single_selected_id() else {
+            return Vec::new();
+        };
+        self.page()
+            .shape(&id)
+            .and_then(|s| s.custom_data.clone())
+            .unwrap_or_default()
+    }
+
+    /// Appends an empty entry to the selected shape's custom data.
+    pub fn add_custom_data(&mut self) {
+        let Some(id) = self.single_selected_id() else {
+            return;
+        };
+        self.begin_change();
+        if let Some(shape) = self.page_mut().shape_mut(&id) {
+            shape
+                .custom_data
+                .get_or_insert_with(Vec::new)
+                .push(dc_model::CustomDataEntry { key: String::new(), value: String::new() });
+        }
+    }
+
+    /// Removes one custom-data entry from the selected shape, by index.
+    pub fn remove_custom_data(&mut self, index: usize) {
+        let Some(id) = self.single_selected_id() else {
+            return;
+        };
+        self.begin_change();
+        if let Some(shape) = self.page_mut().shape_mut(&id) {
+            if let Some(entries) = shape.custom_data.as_mut() {
+                if index < entries.len() {
+                    entries.remove(index);
+                }
+                if entries.is_empty() {
+                    shape.custom_data = None;
+                }
+            }
+        }
+    }
+
+    /// Sets the key of one custom-data entry on the selected shape.
+    pub fn set_custom_data_key(&mut self, index: usize, key: &str) {
+        self.set_custom_data_field(index, |entry| entry.key = key.to_string());
+    }
+
+    /// Sets the value of one custom-data entry on the selected shape.
+    pub fn set_custom_data_value(&mut self, index: usize, value: &str) {
+        self.set_custom_data_field(index, |entry| entry.value = value.to_string());
+    }
+
+    fn set_custom_data_field(&mut self, index: usize, mutate: impl Fn(&mut dc_model::CustomDataEntry)) {
+        let Some(id) = self.single_selected_id() else {
+            return;
+        };
+        self.begin_change();
+        if let Some(shape) = self.page_mut().shape_mut(&id) {
+            if let Some(entry) = shape.custom_data.as_mut().and_then(|e| e.get_mut(index)) {
+                mutate(entry);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------- layers
+
+    pub fn layers(&self) -> &[dc_model::Layer] {
+        self.page().layers()
+    }
+
+    /// The layer a shape or line belongs to, if any.
+    pub fn layer_of(&self, id: &str) -> Option<&dc_model::Layer> {
+        self.page().layers().iter().find(|l| l.items().iter().any(|i| i == id))
+    }
+
+    fn layer_mut(&mut self, id: &str) -> Option<&mut dc_model::Layer> {
+        self.page_mut().layers.as_mut()?.iter_mut().find(|l| l.id == id)
+    }
+
+    /// Adds a new, empty layer on top of the others.
+    pub fn add_layer(&mut self) -> String {
+        self.begin_change();
+        let id = self.package.document.fresh_id("layer");
+        let title = format!("Layer {}", self.page().layers().len() + 1);
+        let layer = dc_model::Layer {
+            id: id.clone(),
+            title: Some(title),
+            items: None,
+            visible: None,
+            locked: None,
+            extra: Default::default(),
+        };
+        self.page_mut().layers.get_or_insert_with(Vec::new).push(layer);
+        id
+    }
+
+    /// Removes a layer. Shapes and lines that were in it are not deleted —
+    /// they simply belong to no layer, the same as before one existed.
+    pub fn delete_layer(&mut self, id: &str) {
+        self.begin_change();
+        if let Some(layers) = self.page_mut().layers.as_mut() {
+            layers.retain(|l| l.id != id);
+        }
+    }
+
+    pub fn rename_layer(&mut self, id: &str, title: &str) {
+        self.begin_change();
+        if let Some(layer) = self.layer_mut(id) {
+            layer.title = Some(title.to_string());
+        }
+    }
+
+    pub fn toggle_layer_visibility(&mut self, id: &str) {
+        self.begin_change();
+        if let Some(layer) = self.layer_mut(id) {
+            layer.visible = Some(!layer.is_visible());
+        }
+    }
+
+    pub fn toggle_layer_lock(&mut self, id: &str) {
+        self.begin_change();
+        if let Some(layer) = self.layer_mut(id) {
+            layer.locked = Some(!layer.is_locked());
+        }
+    }
+
+    /// Moves a layer one slot up or down in the panel's list.
+    pub fn move_layer(&mut self, id: &str, up: bool) {
+        self.begin_change();
+        if let Some(layers) = self.page_mut().layers.as_mut() {
+            if let Some(pos) = layers.iter().position(|l| l.id == id) {
+                let target = if up { pos.checked_sub(1) } else { Some(pos + 1).filter(|&p| p < layers.len()) };
+                if let Some(target) = target {
+                    layers.swap(pos, target);
+                }
+            }
+        }
+    }
+
+    /// Moves the current selection into a layer, removing its members from
+    /// whichever layer they were in before.
+    pub fn move_selection_to_layer(&mut self, layer_id: &str) {
+        let ids = self.selection.clone();
+        if ids.is_empty() {
+            return;
+        }
+        self.begin_change();
+        if let Some(layers) = self.page_mut().layers.as_mut() {
+            for layer in layers.iter_mut() {
+                if let Some(items) = layer.items.as_mut() {
+                    items.retain(|i| !ids.contains(i));
+                }
+            }
+        }
+        if let Some(layer) = self.layer_mut(layer_id) {
+            layer.items.get_or_insert_with(Vec::new).extend(ids);
+        }
+    }
+
+    // ---------------------------------------------------------------- find
+
+    /// Every shape or line whose label contains the query, case- and
+    /// markup-insensitively. Only the first label on a connector is
+    /// searched.
+    pub fn find_matches(&self, query: &str) -> Vec<String> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let q = query.to_lowercase();
+        let page = self.page();
+        let mut ids = Vec::new();
+        for shape in page.shapes() {
+            if let Some((text, base)) = label_of_on(page, &shape.id) {
+                if dc_model::markup::parse(&text, base).plain().to_lowercase().contains(&q) {
+                    ids.push(shape.id.clone());
+                }
+            }
+        }
+        for line in page.lines() {
+            if let Some((text, base)) = label_of_on(page, &line.id) {
+                if dc_model::markup::parse(&text, base).plain().to_lowercase().contains(&q) {
+                    ids.push(line.id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    /// Selects one item and frames it, the way clicking a find result does.
+    pub fn select_and_frame(&mut self, id: &str) {
+        self.selection = vec![id.to_string()];
+        self.zoom_to_selection();
+    }
+
+    /// Replaces the first occurrence of `query` in an item's label with
+    /// `replacement`, matched ASCII-case-insensitively (so the byte offset
+    /// found in the lowercased copy still lines up with the original —
+    /// true Unicode case folding can change a string's length, which plain
+    /// text does not need to handle to be useful here).
+    ///
+    /// The label is rewritten as one plain run: a replace clears whatever
+    /// character styling it had, the same simplification a quick find and
+    /// replace makes in most editors.
+    pub fn replace_in(&mut self, id: &str, query: &str, replacement: &str) {
+        if query.is_empty() {
+            return;
+        }
+        let Some((text, base)) = self.label_of(id) else {
+            return;
+        };
+        let parsed = dc_model::markup::parse(&text, base.clone());
+        let plain = parsed.plain();
+        let Some(pos) = plain.to_ascii_lowercase().find(&query.to_ascii_lowercase()) else {
+            return;
+        };
+
+        let mut updated = String::with_capacity(plain.len() - query.len() + replacement.len());
+        updated.push_str(&plain[..pos]);
+        updated.push_str(replacement);
+        updated.push_str(&plain[pos + query.len()..]);
+
+        let replaced = dc_model::ParsedText {
+            runs: vec![dc_model::TextRun { text: updated, style: base.clone(), link: None }],
+            align: parsed.align,
+            vertical_align: parsed.vertical_align,
+        };
+        let markup = dc_model::markup::to_markup(&replaced, &base);
+
+        self.begin_change();
+        if let Some(shape) = self.page_mut().shape_mut(id) {
+            shape.text = Some(Text::new(markup));
+            return;
+        }
+        if let Some(line) = self.page_mut().line_mut(id) {
+            if let Some(label) = line.text.as_mut().and_then(|l| l.first_mut()) {
+                label.text = markup;
+            }
+        }
+    }
+
     /// Sets the dash pattern of the selected shapes and connectors.
     pub fn set_selection_stroke_style(&mut self, style: dc_model::StrokeStyle) {
         let ids: Vec<String> = self.selection.clone();
@@ -2312,6 +2682,48 @@ impl Editor {
                 .all(|r| r.text.is_empty() || r.style.color == first)
                 .then_some(first)
         })
+    }
+
+    /// The font family shared by the selection, or by the characters
+    /// highlighted inside an open label.
+    pub fn selection_font_family(&self) -> Option<String> {
+        if let (Some(edit), Some(range)) = (self.text_edit.as_ref(), self.styling_range()) {
+            let styles = edit.styles_in(range);
+            let first = styles.first()?.font_family.clone();
+            return styles
+                .iter()
+                .all(|s| s.font_family == first)
+                .then_some(first);
+        }
+        self.agreed(|page, id| {
+            let (text, base) = label_of_on(page, id)?;
+            let parsed = dc_model::markup::parse(&text, base);
+            let first = parsed.runs.first()?.style.font_family.clone();
+            parsed
+                .runs
+                .iter()
+                .all(|r| r.text.is_empty() || r.style.font_family == first)
+                .then_some(first)
+        })
+    }
+
+    /// Sets the font family on the selection, or on the characters
+    /// highlighted inside an open label.
+    pub fn set_font_family(&mut self, family: &str) {
+        if self.restyle_open_label(|style| style.font_family = family.to_string()) {
+            return;
+        }
+
+        let ids: Vec<String> = self.selection.clone();
+        if ids.is_empty() {
+            return;
+        }
+        self.begin_change();
+        for id in ids {
+            self.rewrite_label(&id, |markup, base| {
+                dc_model::markup::restyle(markup, base, |style| style.font_family = family.to_string())
+            });
+        }
     }
 
     pub fn set_selection_line_type(&mut self, line_type: LineType) {
@@ -2957,6 +3369,66 @@ mod tests {
         assert!(!e.can_undo(), "a click should not create an undo step");
     }
 
+    // -------------------------------------------------------- freehand tool
+
+    #[test]
+    fn the_freehand_tool_draws_a_stroke() {
+        let mut tcx = TestCx::new();
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        e.tool = Tool::Freehand;
+
+        e.pointer_down(Point::new(100.0, 100.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(150.0, 180.0), mods(), &mut tcx.ctx());
+        e.pointer_move(Point::new(200.0, 100.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(200.0, 100.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(e.page().shapes().len(), 1);
+        let shape = &e.page().shapes()[0];
+        assert_eq!(shape.shape_type, ShapeType::FreehandDrawing);
+        assert_eq!(shape.points.as_ref().map(Vec::len), Some(3));
+
+        let bb = shape.bounding_box;
+        assert!((bb.x - 100.0).abs() < 0.5 && (bb.y - 100.0).abs() < 0.5);
+        assert!((bb.w - 100.0).abs() < 0.5 && (bb.h - 80.0).abs() < 0.5);
+
+        // The pen stays armed, unlike placing a shape, so a string of
+        // strokes does not need re-selecting the tool each time.
+        assert_eq!(e.tool, Tool::Freehand);
+    }
+
+    #[test]
+    fn a_plain_click_with_the_freehand_tool_draws_nothing() {
+        let mut tcx = TestCx::new();
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        e.tool = Tool::Freehand;
+
+        e.pointer_down(Point::new(100.0, 100.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_up(Point::new(100.0, 100.0), mods(), &mut tcx.ctx());
+
+        assert!(e.page().shapes().is_empty());
+        assert!(!e.can_undo(), "nothing was created, so there is nothing to undo");
+    }
+
+    #[test]
+    fn a_freehand_stroke_is_one_undo_step() {
+        let mut tcx = TestCx::new();
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        e.tool = Tool::Freehand;
+
+        e.pointer_down(Point::new(100.0, 100.0), mods(), false, 1, &mut tcx.ctx());
+        for step in 1..=10 {
+            e.pointer_move(Point::new(100.0 + step as f64 * 5.0, 100.0 + step as f64 * 3.0), mods(), &mut tcx.ctx());
+        }
+        e.pointer_up(Point::new(150.0, 130.0), mods(), &mut tcx.ctx());
+        assert_eq!(e.page().shapes().len(), 1);
+
+        e.undo();
+        assert!(e.page().shapes().is_empty(), "one undo should remove the whole stroke");
+    }
+
     #[test]
     fn snapping_aligns_a_dragged_shape_to_its_neighbor() {
         let mut tcx = TestCx::new();
@@ -3359,6 +3831,35 @@ mod tests {
     }
 
     #[test]
+    fn zoom_to_selection_frames_just_the_selection() {
+        let mut e = editor_with_two_shapes();
+        let ids: Vec<String> = e.page().shapes().iter().map(|s| s.id.clone()).collect();
+        e.selection = vec![ids[0].clone()];
+        e.zoom_to_selection();
+
+        let visible = e.camera.visible_rect();
+        let selected_bb = e.page().shape(&ids[0]).unwrap().bounding_box;
+        assert!(
+            selected_bb.x >= visible.x0 - 1.0 && selected_bb.right() <= visible.x1 + 1.0,
+            "{selected_bb:?} is outside {visible:?}"
+        );
+        // A single 100x60 shape in a 1000x700 viewport should end up zoomed
+        // in well past what framing both shapes together would need.
+        assert!(e.camera.zoom > 2.0, "zoom {} is not tight on the selection", e.camera.zoom);
+    }
+
+    #[test]
+    fn zoom_to_selection_does_nothing_with_no_selection() {
+        let mut e = editor_with_two_shapes();
+        e.selection.clear();
+        let origin = e.camera.origin;
+        let zoom = e.camera.zoom;
+        e.zoom_to_selection();
+        assert_eq!(e.camera.origin, origin);
+        assert_eq!(e.camera.zoom, zoom);
+    }
+
+    #[test]
     fn zoom_to_fit_on_an_empty_page_frames_the_sheet() {
         let mut e = Editor::new();
         e.resize_viewport(1000.0, 700.0);
@@ -3565,6 +4066,30 @@ mod tests {
         assert!(!e.can_undo());
         assert!(!e.dirty);
         assert_eq!(e.camera.zoom, 1.0);
+    }
+
+    #[test]
+    fn new_document_from_template_loads_its_content_and_resets_state() {
+        let mut e = editor_with_two_shapes();
+        e.select_all();
+        e.path = Some(std::path::PathBuf::from("/tmp/whatever.lucid"));
+
+        let mut template = Document::new();
+        template.pages[0].add_shape(Shape::new(
+            "from-template",
+            ShapeType::Rectangle,
+            BoundingBox::new(0.0, 0.0, 50.0, 50.0),
+        ));
+        e.new_document_from_template(template, "Basic Flowchart");
+
+        assert_eq!(e.page().shapes().len(), 1);
+        assert_eq!(e.page().shapes()[0].id, "from-template");
+        assert!(e.selection.is_empty());
+        assert!(!e.can_undo());
+        assert!(!e.dirty);
+        assert_eq!(e.camera.zoom, 1.0);
+        assert!(e.path.is_none(), "a template is not the file it came from");
+        assert_eq!(e.status, "New document from Basic Flowchart");
     }
 
     #[test]
@@ -3868,6 +4393,336 @@ mod tests {
         let text = e.page().shape(&e.selection[0]).unwrap().text_str().to_string();
         let parsed = dc_model::markup::parse(&text, dc_model::TextStyle::default());
         assert_eq!(parsed.vertical_align, dc_model::VerticalAlign::Top);
+    }
+
+    #[test]
+    fn font_family_applies_to_the_selection() {
+        let mut e = labelled_editor();
+        assert_eq!(e.selection_font_family(), Some("Liberation Sans".to_string()));
+
+        e.set_font_family("Georgia");
+        // The markup layer round-trips CSS values in lowercase; font lookup
+        // is case-insensitive, so this is still the font that was asked for.
+        assert_eq!(label_style(&e).font_family, "georgia");
+        assert_eq!(e.selection_font_family(), Some("georgia".to_string()));
+    }
+
+    #[test]
+    fn selection_font_family_reports_none_when_mixed() {
+        let mut e = labelled_editor();
+        let a = e.selection[0].clone();
+        e.set_font_family("Georgia");
+
+        let b = e.create_shape(ShapeType::Rectangle, BoundingBox::new(200.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&b) {
+            shape.text = Some(dc_model::Text::new("other"));
+        }
+        e.selection = vec![a];
+        assert_eq!(e.selection_font_family(), Some("georgia".to_string()));
+
+        e.selection.push(b);
+        assert_eq!(
+            e.selection_font_family(),
+            None,
+            "the two shapes disagree, so nothing is reported as shared"
+        );
+    }
+
+    // ----------------------------------------------------------------- link
+
+    #[test]
+    fn setting_and_clearing_a_link() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        assert_eq!(e.selection_link(), None);
+
+        e.set_link_url("https://example.com");
+        assert_eq!(
+            e.selection_link(),
+            Some(dc_model::Action::Url { url: "https://example.com".into(), new_window: None })
+        );
+
+        e.clear_link();
+        assert_eq!(e.selection_link(), None);
+    }
+
+    #[test]
+    fn setting_a_link_replaces_any_existing_one() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id.clone()];
+        e.set_link_url("https://first.example");
+        e.set_link_url("https://second.example");
+
+        let shape = e.page().shape(&id).unwrap();
+        assert_eq!(shape.actions.as_ref().map(Vec::len), Some(1), "not accumulating duplicates");
+        assert_eq!(
+            e.selection_link(),
+            Some(dc_model::Action::Url { url: "https://second.example".into(), new_window: None })
+        );
+    }
+
+    #[test]
+    fn a_link_needs_exactly_one_shape_selected() {
+        let mut e = Editor::new();
+        let a = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        let b = e.create_shape(ShapeType::Rectangle, BoundingBox::new(50.0, 0.0, 10.0, 10.0));
+        e.selection = vec![a, b];
+        e.set_link_url("https://example.com");
+        assert_eq!(e.selection_link(), None, "a multi-selection has no single link to report");
+    }
+
+    // ----------------------------------------------------------- custom data
+
+    #[test]
+    fn adding_and_editing_custom_data() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        assert!(e.selection_custom_data().is_empty());
+
+        e.add_custom_data();
+        assert_eq!(e.selection_custom_data().len(), 1);
+
+        e.set_custom_data_key(0, "owner");
+        e.set_custom_data_value(0, "ops");
+        let entries = e.selection_custom_data();
+        assert_eq!(entries[0].key, "owner");
+        assert_eq!(entries[0].value, "ops");
+    }
+
+    #[test]
+    fn removing_a_custom_data_entry() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id.clone()];
+        e.add_custom_data();
+        e.set_custom_data_key(0, "a");
+        e.add_custom_data();
+        e.set_custom_data_key(1, "b");
+
+        e.remove_custom_data(0);
+        let entries = e.selection_custom_data();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "b");
+
+        e.remove_custom_data(0);
+        assert!(e.selection_custom_data().is_empty());
+        assert!(
+            e.page().shape(&id).unwrap().custom_data.is_none(),
+            "an emptied list should not linger as Some(vec![])"
+        );
+    }
+
+    #[test]
+    fn custom_data_needs_exactly_one_shape_selected() {
+        let mut e = Editor::new();
+        let a = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        let b = e.create_shape(ShapeType::Rectangle, BoundingBox::new(50.0, 0.0, 10.0, 10.0));
+        e.selection = vec![a, b];
+        e.add_custom_data();
+        assert!(e.selection_custom_data().is_empty());
+    }
+
+    // ----------------------------------------------------------------layers
+
+    #[test]
+    fn adding_and_renaming_layers() {
+        let mut e = Editor::new();
+        assert!(e.layers().is_empty());
+
+        let id = e.add_layer();
+        assert_eq!(e.layers().len(), 1);
+        assert_eq!(e.layers()[0].title.as_deref(), Some("Layer 1"));
+
+        e.rename_layer(&id, "Background");
+        assert_eq!(e.layers()[0].title.as_deref(), Some("Background"));
+    }
+
+    #[test]
+    fn toggling_visibility_and_lock() {
+        let mut e = Editor::new();
+        let id = e.add_layer();
+        assert!(e.layers()[0].is_visible());
+        assert!(!e.layers()[0].is_locked());
+
+        e.toggle_layer_visibility(&id);
+        assert!(!e.layers()[0].is_visible());
+        e.toggle_layer_visibility(&id);
+        assert!(e.layers()[0].is_visible());
+
+        e.toggle_layer_lock(&id);
+        assert!(e.layers()[0].is_locked());
+    }
+
+    #[test]
+    fn deleting_a_layer_leaves_its_shapes_alone() {
+        let mut e = Editor::new();
+        let shape = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        let layer = e.add_layer();
+        e.selection = vec![shape.clone()];
+        e.move_selection_to_layer(&layer);
+        assert!(e.layer_of(&shape).is_some());
+
+        e.delete_layer(&layer);
+        assert!(e.layers().is_empty());
+        assert!(e.page().shape(&shape).is_some(), "the shape itself must survive");
+        assert!(e.layer_of(&shape).is_none());
+    }
+
+    #[test]
+    fn moving_layers_up_and_down() {
+        let mut e = Editor::new();
+        let a = e.add_layer();
+        let b = e.add_layer();
+        let c = e.add_layer();
+        assert_eq!(layer_ids(&e), vec![a.clone(), b.clone(), c.clone()]);
+
+        e.move_layer(&b, true);
+        assert_eq!(layer_ids(&e), vec![b.clone(), a.clone(), c.clone()]);
+
+        e.move_layer(&b, false);
+        assert_eq!(layer_ids(&e), vec![a.clone(), b.clone(), c.clone()]);
+
+        // Already at an edge: nothing moves, nothing panics.
+        e.move_layer(&a, true);
+        assert_eq!(layer_ids(&e), vec![a.clone(), b.clone(), c.clone()]);
+        e.move_layer(&c, false);
+        assert_eq!(layer_ids(&e), vec![a, b, c]);
+    }
+
+    fn layer_ids(e: &Editor) -> Vec<String> {
+        e.layers().iter().map(|l| l.id.clone()).collect()
+    }
+
+    #[test]
+    fn moving_the_selection_between_layers() {
+        let mut e = Editor::new();
+        let shape = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        let first = e.add_layer();
+        let second = e.add_layer();
+        e.selection = vec![shape.clone()];
+
+        e.move_selection_to_layer(&first);
+        assert_eq!(e.layer_of(&shape).map(|l| l.id.clone()), Some(first.clone()));
+
+        e.move_selection_to_layer(&second);
+        assert_eq!(e.layer_of(&shape).map(|l| l.id.clone()), Some(second));
+        assert!(
+            !e.layers().iter().find(|l| l.id == first).unwrap().items().contains(&shape),
+            "moving to a new layer should remove it from the old one"
+        );
+    }
+
+    // ----------------------------------------------------- find and replace
+
+    #[test]
+    fn finding_matches_across_shapes_and_lines() {
+        let mut e = Editor::new();
+        let a = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&a) {
+            shape.text = Some(dc_model::Text::new("Approval step"));
+        }
+        let b = e.create_shape(ShapeType::Rectangle, BoundingBox::new(200.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&b) {
+            shape.text = Some(dc_model::Text::new("Nothing relevant"));
+        }
+
+        let matches = e.find_matches("approval");
+        assert_eq!(matches, vec![a]);
+    }
+
+    #[test]
+    fn find_is_case_insensitive_and_ignores_markup() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&id) {
+            shape.text = Some(dc_model::Text::new("<b>APPROVAL</b> step"));
+        }
+        assert_eq!(e.find_matches("approval"), vec![id]);
+    }
+
+    #[test]
+    fn an_empty_query_matches_nothing() {
+        let mut e = Editor::new();
+        e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        assert!(e.find_matches("").is_empty());
+        assert!(e.find_matches("   ").is_empty());
+    }
+
+    #[test]
+    fn selecting_and_framing_a_match() {
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(500.0, 500.0, 100.0, 40.0));
+        e.camera.zoom = 8.0;
+
+        e.select_and_frame(&id);
+        assert_eq!(e.selection, vec![id.clone()]);
+        let visible = e.camera.visible_rect();
+        let bb = e.page().shape(&id).unwrap().bounding_box;
+        assert!(bb.x >= visible.x0 - 1.0 && bb.right() <= visible.x1 + 1.0);
+    }
+
+    #[test]
+    fn replacing_the_first_match_in_a_label() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&id) {
+            shape.text = Some(dc_model::Text::new("Approve the approval"));
+        }
+
+        e.replace_in(&id, "approval", "request");
+        assert_eq!(e.page().shape(&id).unwrap().text_str(), "Approve the request");
+    }
+
+    #[test]
+    fn replace_matches_ascii_case_insensitively() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&id) {
+            shape.text = Some(dc_model::Text::new("APPROVAL pending"));
+        }
+
+        e.replace_in(&id, "approval", "request");
+        assert_eq!(e.page().shape(&id).unwrap().text_str(), "request pending");
+    }
+
+    #[test]
+    fn replacing_a_query_with_no_match_does_nothing() {
+        let mut e = Editor::new();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&id) {
+            shape.text = Some(dc_model::Text::new("hello"));
+        }
+
+        e.replace_in(&id, "goodbye", "hi");
+        assert_eq!(e.page().shape(&id).unwrap().text_str(), "hello");
+    }
+
+    #[test]
+    fn replacing_a_line_label() {
+        let mut e = Editor::new();
+        let a = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 50.0, 40.0));
+        let b = e.create_shape(ShapeType::Rectangle, BoundingBox::new(200.0, 0.0, 50.0, 40.0));
+        e.create_connector(
+            Some(a),
+            BoundingBox::new(0.0, 0.0, 50.0, 40.0).center(),
+            Some(b),
+            BoundingBox::new(200.0, 0.0, 50.0, 40.0).center(),
+        );
+        let line_id = e.page().lines()[0].id.clone();
+        if let Some(line) = e.package.document.pages[0].line_mut(&line_id) {
+            line.text = Some(vec![dc_model::LineLabel::new("approval needed")]);
+        }
+
+        assert_eq!(e.find_matches("approval"), vec![line_id.clone()]);
+        e.replace_in(&line_id, "approval", "sign-off");
+        assert_eq!(
+            e.page().line(&line_id).unwrap().labels()[0].text,
+            "sign-off needed"
+        );
     }
 
     #[test]

@@ -132,6 +132,7 @@ pub fn render_editor_png(
         settings: crate::settings::Settings { dark_theme: dark, ..Default::default() },
         library,
         settings_open,
+        ..Default::default()
     };
     let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None, None);
     let canvas = chrome.layout.canvas;

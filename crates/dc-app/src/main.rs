@@ -17,6 +17,7 @@ mod menu;
 #[cfg(target_os = "macos")]
 mod native_menu;
 mod samples;
+mod templates;
 mod settings;
 mod snap;
 mod textedit;

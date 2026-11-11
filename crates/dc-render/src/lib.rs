@@ -414,12 +414,19 @@ impl Renderer {
             Line(&'a Line),
         }
 
+        let hidden = hidden_item_ids(page);
         let mut items: Vec<(i64, usize, Item<'_>)> = Vec::new();
         for (i, s) in page.shapes().iter().enumerate() {
+            if hidden.contains(s.id.as_str()) {
+                continue;
+            }
             items.push((s.resolved_z_index(), i, Item::Shape(s)));
         }
         let shape_count = page.shapes().len();
         for (i, l) in page.lines().iter().enumerate() {
+            if hidden.contains(l.id.as_str()) {
+                continue;
+            }
             items.push((l.resolved_z_index(), shape_count + i, Item::Line(l)));
         }
         // Equal z-index falls back to document order, which keeps painting
@@ -926,7 +933,11 @@ impl Renderer {
 /// Shapes are tested front to back. Connectors are tested within `tolerance`
 /// document units of their route, since a hairline is hard to hit exactly.
 pub fn pick(page: &Page, at: Point, tolerance: f64, route_around_shapes: bool) -> Option<String> {
+    let unpickable = unpickable_item_ids(page);
     for shape in page.shapes_in_paint_order().into_iter().rev() {
+        if unpickable.contains(shape.id.as_str()) {
+            continue;
+        }
         if shape.bounding_box.contains_rotated(at) {
             return Some(shape.id.clone());
         }
@@ -936,6 +947,9 @@ pub fn pick(page: &Page, at: Point, tolerance: f64, route_around_shapes: bool) -
     router.avoid_obstacles = route_around_shapes;
     let mut best: Option<(f64, String)> = None;
     for line in page.lines() {
+        if unpickable.contains(line.id.as_str()) {
+            continue;
+        }
         let Some(route) = router.route(line) else {
             continue;
         };
@@ -953,10 +967,32 @@ pub fn pick(page: &Page, at: Point, tolerance: f64, route_around_shapes: bool) -
 
 /// Every shape whose box intersects a region, for marquee selection.
 pub fn pick_in_region(page: &Page, region: BoundingBox) -> Vec<String> {
+    let unpickable = unpickable_item_ids(page);
     page.shapes()
         .iter()
-        .filter(|s| s.bounding_box.aabb().intersects(&region))
+        .filter(|s| !unpickable.contains(s.id.as_str()) && s.bounding_box.aabb().intersects(&region))
         .map(|s| s.id.clone())
+        .collect()
+}
+
+/// The ids of every item sitting in a hidden layer — nothing draws them.
+fn hidden_item_ids(page: &Page) -> std::collections::HashSet<&str> {
+    page.layers()
+        .iter()
+        .filter(|l| !l.is_visible())
+        .flat_map(|l| l.items())
+        .map(|s| s.as_str())
+        .collect()
+}
+
+/// The ids of every item that cannot be picked: hidden (nothing to click)
+/// or locked (visible, but not selectable).
+fn unpickable_item_ids(page: &Page) -> std::collections::HashSet<&str> {
+    page.layers()
+        .iter()
+        .filter(|l| !l.is_visible() || l.is_locked())
+        .flat_map(|l| l.items())
+        .map(|s| s.as_str())
         .collect()
 }
 
@@ -1015,7 +1051,7 @@ pub type RouteObstacles = Obstacles;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dc_model::{Endpoint, EndpointStyle, LineType, ShapeType, Style, Units};
+    use dc_model::{Endpoint, EndpointStyle, Layer, LineType, ShapeType, Style, Units};
     use kurbo::Vec2;
 
     fn doc_with_flowchart() -> Document {
@@ -1312,6 +1348,83 @@ mod tests {
             pick(&doc.pages[0], Point::new(50.0, 50.0), 4.0, true).as_deref(),
             Some("front")
         );
+    }
+
+    #[test]
+    fn a_locked_layers_shape_cannot_be_picked() {
+        let mut doc = Document::new();
+        let page = &mut doc.pages[0];
+        page.add_shape(Shape::new("s1", ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 100.0)));
+        page.layers = Some(vec![Layer {
+            id: "l1".into(),
+            title: None,
+            items: Some(vec!["s1".into()]),
+            visible: None,
+            locked: Some(true),
+            extra: Default::default(),
+        }]);
+
+        assert_eq!(pick(&doc.pages[0], Point::new(50.0, 50.0), 4.0, true), None);
+        assert!(pick_in_region(&doc.pages[0], BoundingBox::new(0.0, 0.0, 100.0, 100.0)).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_layers_shape_cannot_be_picked_either() {
+        let mut doc = Document::new();
+        let page = &mut doc.pages[0];
+        page.add_shape(Shape::new("s1", ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 100.0)));
+        page.layers = Some(vec![Layer {
+            id: "l1".into(),
+            title: None,
+            items: Some(vec!["s1".into()]),
+            visible: Some(false),
+            locked: None,
+            extra: Default::default(),
+        }]);
+
+        assert_eq!(pick(&doc.pages[0], Point::new(50.0, 50.0), 4.0, true), None);
+    }
+
+    #[test]
+    fn a_shape_outside_any_layer_picks_normally() {
+        let mut doc = Document::new();
+        let page = &mut doc.pages[0];
+        page.add_shape(Shape::new("s1", ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 100.0)));
+        page.layers = Some(vec![Layer {
+            id: "l1".into(),
+            title: None,
+            items: Some(vec!["someone-else".into()]),
+            visible: Some(false),
+            locked: Some(true),
+            extra: Default::default(),
+        }]);
+
+        assert_eq!(pick(&doc.pages[0], Point::new(50.0, 50.0), 4.0, true).as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn a_hidden_layers_shape_is_not_drawn() {
+        let mut doc = Document::new();
+        let page = &mut doc.pages[0];
+        page.add_shape(Shape::new("hidden", ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 100.0)));
+        page.layers = Some(vec![Layer {
+            id: "l1".into(),
+            title: None,
+            items: Some(vec!["hidden".into()]),
+            visible: Some(false),
+            locked: None,
+            extra: Default::default(),
+        }]);
+
+        let mut r = Renderer::new();
+        r.options.show_grid = false;
+        r.options.show_page_bounds = false;
+        let mut scene = Scene::new();
+        r.draw(&mut scene, &doc, 0, &camera(), &Overlay::default());
+
+        // Only the viewport fill should be present, the same as a fully
+        // transparent shape.
+        assert_eq!(scene.encoding().n_paths, 1, "a hidden-layer shape was drawn");
     }
 
     #[test]

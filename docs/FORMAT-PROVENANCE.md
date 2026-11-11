@@ -23,7 +23,7 @@ pages, all publicly readable without an account:
 | Topic | Source |
 |---|---|
 | Package layout, `document.json`, 2 MB limit | <https://developer.lucid.co/docs/overview-si> |
-| Shared types: bounding box, position, fill, stroke, style, text, ID rules | <https://developer.lucid.co/docs/reference-si> |
+| Shared types: bounding box, position, fill, stroke, style, text, ID rules, the `Action` type (hyperlinks and navigation), Custom Data | <https://developer.lucid.co/docs/reference-si> |
 | Page object and page settings | <https://developer.lucid.co/docs/pages-si> |
 | Shape common properties, and the list of libraries | <https://developer.lucid.co/docs/shapes-si> |
 | Standard library (5 shape types) | <https://developer.lucid.co/docs/standard-library-si> |
@@ -38,6 +38,7 @@ pages, all publicly readable without an account:
 | GCP 2021 library | <https://developer.lucid.co/docs/gcp-2021-library> |
 | Lines, endpoints, endpoint styles, labels | <https://developer.lucid.co/docs/lines-si> |
 | Groups | <https://developer.lucid.co/docs/groups-si> |
+| Layers | <https://developer.lucid.co/docs/layers-si> |
 
 The Shape library shares its `rectangle` type with the Standard library, so the
 68 types this build implements are 5 + 13 + 24 + 8 + 11 + 1 + 4 + 2 rather than

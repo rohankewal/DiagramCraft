@@ -32,6 +32,10 @@ pub enum UiAction {
 
     // File
     NewDocument,
+    OpenTemplateGallery,
+    CloseTemplateGallery,
+    /// Replaces the document with a template, by index into `templates::ALL`.
+    NewFromTemplate(usize),
     Open,
     ImportVsdx,
     Save,
@@ -61,6 +65,38 @@ pub enum UiAction {
     // Insert
     InsertImage,
     SelectLibrary(ShapeLibrary),
+    /// Puts keystrokes into the palette's search field.
+    FocusPaletteSearch,
+    /// Puts keystrokes into the selected shape's link field.
+    FocusLinkField,
+    /// Removes the selected shape's link.
+    ClearLink,
+    /// Opens the selected shape's link: a URL in the browser, or a jump to
+    /// another page.
+    OpenLink,
+    /// Appends an empty custom-data entry to the selected shape.
+    AddCustomData,
+    /// Removes a custom-data entry, by index.
+    RemoveCustomData(usize),
+    /// Puts keystrokes into a custom-data entry's key or value field.
+    FocusCustomDataKey(usize),
+    FocusCustomDataValue(usize),
+    /// Shows or hides the layers panel.
+    ToggleLayersPanel,
+    AddLayer,
+    DeleteLayer(String),
+    ToggleLayerVisibility(String),
+    ToggleLayerLock(String),
+    /// Moves the current selection into a layer.
+    MoveSelectionToLayer(String),
+    /// Shows or hides the find bar.
+    ToggleFind,
+    /// Puts keystrokes into the find query or the replacement field.
+    FocusFindQuery,
+    FocusFindReplacement,
+    FindNext,
+    FindPrevious,
+    ReplaceCurrentMatch,
 
     // Format
     SetFill(Color),
@@ -73,6 +109,7 @@ pub enum UiAction {
     SetTextAlign(dc_model::TextAlign),
     SetVerticalAlign(dc_model::VerticalAlign),
     SetTextColor(Color),
+    SetFontFamily(&'static str),
 
     // Lines
     SetEndpointStyle(crate::editor::LineEnd, dc_model::EndpointStyle),
@@ -102,6 +139,7 @@ pub enum UiAction {
     ZoomIn,
     ZoomOut,
     ZoomFit,
+    ZoomToSelection,
     ActualSize,
     ToggleGrid,
     TogglePageBounds,
@@ -207,6 +245,13 @@ pub enum RegionKind {
     MenuBackdrop,
     /// A library selector in the palette.
     LibraryTab { active: bool },
+    /// A plain single-line field: the palette search, or a shape's link
+    /// URL. The live value lives in `Region.label`; `placeholder` is shown
+    /// in its place, muted, while the value is empty.
+    TextField { focused: bool, placeholder: &'static str },
+    /// A floating panel's background, clickable so a click on empty space
+    /// inside it does not fall through to whatever is behind it.
+    Panel,
     /// Where a dragged page tab would land.
     DropMarker,
     /// The dimmed sheet behind the settings screen.
@@ -313,6 +358,7 @@ impl UiAction {
                 | UiAction::SetTextAlign(_)
                 | UiAction::SetVerticalAlign(_)
                 | UiAction::SetTextColor(_)
+                | UiAction::SetFontFamily(_)
                 // So do the text operations.
                 | UiAction::Cut
                 | UiAction::Copy
@@ -399,6 +445,13 @@ pub enum ContextTarget {
     Page(usize),
 }
 
+/// Which custom-data field is being typed into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustomDataFocus {
+    Key(usize),
+    Value(usize),
+}
+
 /// Chrome built for one frame.
 pub struct Chrome {
     pub layout: Layout,
@@ -409,6 +462,12 @@ pub struct Chrome {
     pub context_menu: Option<Rect>,
     /// The settings screen's sheet, when it is up.
     pub settings_sheet: Option<Rect>,
+    /// The "New from Template" gallery's sheet, when it is up.
+    pub template_gallery: Option<Rect>,
+    /// The layers panel, when it is open.
+    pub layers_panel: Option<Rect>,
+    /// The find bar, when it is open.
+    pub find_bar: Option<Rect>,
     /// Where each page tab sits, so a drag can be resolved to an index.
     pub tab_rects: Vec<Rect>,
 }
@@ -438,6 +497,13 @@ const STROKE_SWATCHES: [Color; 8] = [
     Color::rgb(0x25, 0x63, 0xeb),
     Color::rgb(0x7c, 0x3a, 0xed),
 ];
+
+/// Font families offered in the properties panel, each a real face name
+/// `dc-render` can request: the format's default, then a serif and a
+/// monospace alternative. Freeform entry is left for later — a short list
+/// covers the common cases without a font-chooser dialog.
+const FONT_FAMILIES: [(&str, &str); 3] =
+    [("Sans", "Liberation Sans"), ("Serif", "Georgia"), ("Mono", "Courier New")];
 
 const PAD: f64 = 10.0;
 const ROW_HEIGHT: f64 = 26.0;
@@ -475,7 +541,7 @@ impl Chrome {
         let title_rects = build_menubar(&layout, &menus, open_menu, &mut regions);
         build_tool_strip(&layout, editor, &mut regions);
         build_palette(&layout, editor, view, &mut regions);
-        build_properties(&layout, editor, &mut regions);
+        build_properties(&layout, editor, view, &mut regions);
         let tab_rects = build_tabs(&layout, editor, tab_drag, &mut regions);
 
         // An open menu is built last so it paints over the panels and wins hit
@@ -494,12 +560,36 @@ impl Chrome {
             build_context_menu(&layout, &menu, at, &mut regions)
         });
 
+        // The layers panel floats over the canvas rather than resizing it,
+        // the same way a context menu does, so opening it does not disturb
+        // the camera's framing.
+        let layers_panel =
+            view.layers_panel_open.then(|| build_layers_panel(&layout, editor, &mut regions));
+
+        // The find bar floats the same way.
+        let find_bar = view.find_open.then(|| build_find_bar(&layout, editor, view, &mut regions));
+
+        // The template gallery is modal, the same way settings is.
+        let template_gallery = view
+            .template_gallery_open
+            .then(|| build_template_gallery(&layout, &mut regions));
+
         // The settings screen covers everything, menus included.
         let settings_sheet = view
             .settings_open
             .then(|| build_settings(&layout, view, &mut regions));
 
-        Chrome { layout, regions, open_menu: open, context_menu, settings_sheet, tab_rects }
+        Chrome {
+            layout,
+            regions,
+            open_menu: open,
+            context_menu,
+            settings_sheet,
+            template_gallery,
+            layers_panel,
+            find_bar,
+            tab_rects,
+        }
     }
 
     /// The control under a window-space point.
@@ -543,9 +633,13 @@ impl Chrome {
 
     /// Whether a window-space point is over the drawing area.
     pub fn is_over_canvas(&self, p: kurbo::Point) -> bool {
-        // The settings screen is modal, so nothing is over the canvas while
-        // it is up.
-        if self.settings_sheet.is_some() || self.covered_by_open_menu(p) || self.covered_by_context_menu(p) {
+        // The settings screen and the template gallery are both modal, so
+        // nothing is over the canvas while either is up.
+        if self.settings_sheet.is_some()
+            || self.template_gallery.is_some()
+            || self.covered_by_open_menu(p)
+            || self.covered_by_context_menu(p)
+        {
             return false;
         }
         self.layout.canvas.contains(p) && self.hit(p).is_none()
@@ -746,6 +840,36 @@ impl Chrome {
                 return;
             }
 
+            RegionKind::TextField { focused, placeholder } => {
+                scene.fill(FillRule::NonZero, Affine::IDENTITY, px(theme.panel), None, &rounded);
+                scene.stroke(
+                    &kurbo::Stroke::new(1.0),
+                    Affine::IDENTITY,
+                    px(if *focused { theme.accent } else { theme.panel_border }),
+                    None,
+                    &rounded,
+                );
+
+                let empty = region.label.is_empty();
+                let shown: &str = if empty { placeholder } else { &region.label };
+                let style = dc_model::TextStyle {
+                    color: if empty { theme.text_muted } else { theme.text },
+                    font_size_pt: 11.0,
+                    align: dc_model::TextAlign::Left,
+                    vertical_align: dc_model::VerticalAlign::Center,
+                    ..Default::default()
+                };
+                let area = Rect::new(
+                    region.rect.x0 + 8.0,
+                    region.rect.y0,
+                    region.rect.x1 - 8.0,
+                    region.rect.y1,
+                );
+                let block = text.layout_plain(shown, &style, Some(area.width()));
+                dc_render::text::draw(scene, &block, area, Affine::IDENTITY);
+                return;
+            }
+
             RegionKind::MenuBackdrop => {
                 // A shadow first, so the panel reads as floating over the
                 // canvas rather than cut into it.
@@ -884,6 +1008,27 @@ impl Chrome {
             }
 
             RegionKind::Sheet => {
+                let shadow = region.rect + kurbo::Vec2::new(0.0, 6.0);
+                scene.fill(
+                    FillRule::NonZero,
+                    Affine::IDENTITY,
+                    px(theme.page_shadow),
+                    None,
+                    &kurbo::RoundedRect::from_rect(shadow, 12.0),
+                );
+                let surface = kurbo::RoundedRect::from_rect(region.rect, 12.0);
+                scene.fill(FillRule::NonZero, Affine::IDENTITY, px(theme.panel), None, &surface);
+                scene.stroke(
+                    &kurbo::Stroke::new(1.0),
+                    Affine::IDENTITY,
+                    px(theme.panel_border),
+                    None,
+                    &surface,
+                );
+                return;
+            }
+
+            RegionKind::Panel => {
                 let shadow = region.rect + kurbo::Vec2::new(0.0, 6.0);
                 scene.fill(
                     FillRule::NonZero,
@@ -1469,12 +1614,13 @@ fn build_tool_strip(layout: &Layout, editor: &Editor, out: &mut Vec<Region>) {
     let x0 = panel.x0 + PAD;
     let x1 = panel.x1 - PAD;
     let y = panel.y0 + PAD;
-    let width = ((x1 - x0) - 2.0 * 4.0) / 3.0;
+    let width = ((x1 - x0) - 3.0 * 4.0) / 4.0;
 
     for (i, (label, tool)) in [
         ("Select", Tool::Select),
         ("Pan", Tool::Pan),
         ("Connect", Tool::Connector),
+        ("Pen", Tool::Freehand),
     ]
     .into_iter()
     .enumerate()
@@ -1504,6 +1650,32 @@ fn build_palette(layout: &Layout, editor: &Editor, view: &ViewState, out: &mut V
     let x0 = panel.x0 + PAD;
     let x1 = panel.x1 - PAD;
     let mut y = palette_top(layout);
+
+    out.push(Region {
+        rect: Rect::new(x0, y, x1, y + 22.0),
+        action: UiAction::FocusPaletteSearch,
+        label: view.palette_search.clone(),
+        kind: RegionKind::TextField {
+            focused: view.palette_search_focused,
+            placeholder: "Search shapes…",
+        },
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    y += 22.0 + 8.0;
+
+    let columns = ((panel.width() - PAD) / (TILE_WIDTH + 4.0)).floor().max(1.0) as usize;
+    let query = view.palette_search.trim().to_ascii_lowercase();
+    if !query.is_empty() {
+        // A search spans every library at once, since the point is not
+        // having to already know which one a shape lives in.
+        let matches = ShapeLibrary::ALL.iter().flat_map(|lib| lib.types()).filter(|t| {
+            t.display_name().to_ascii_lowercase().contains(&query)
+        });
+        build_shape_tiles(matches, x0, panel.y1, y, columns, editor, out);
+        return;
+    }
 
     // A row of library tabs, because sixty-eight shapes do not fit at once.
     let per_row = 4usize;
@@ -1536,13 +1708,27 @@ fn build_palette(layout: &Layout, editor: &Editor, view: &ViewState, out: &mut V
     });
     y += 22.0;
 
-    let columns = ((panel.width() - PAD) / (TILE_WIDTH + 4.0)).floor().max(1.0) as usize;
-    for (i, shape_type) in view.library.types().iter().enumerate() {
+    build_shape_tiles(view.library.types().into_iter(), x0, panel.y1, y, columns, editor, out);
+}
+
+/// Lays shape tiles out in a grid, stopping once they would run past
+/// `bottom` — shared between browsing one library and a cross-library
+/// search, which differ only in which shapes they offer.
+fn build_shape_tiles(
+    shapes: impl Iterator<Item = ShapeType>,
+    x0: f64,
+    bottom: f64,
+    y: f64,
+    columns: usize,
+    editor: &Editor,
+    out: &mut Vec<Region>,
+) {
+    for (i, shape_type) in shapes.enumerate() {
         let col = i % columns;
         let row = i / columns;
         let x = x0 + col as f64 * (TILE_WIDTH + 4.0);
         let top = y + row as f64 * (TILE_HEIGHT + 4.0);
-        if top + TILE_HEIGHT > panel.y1 {
+        if top + TILE_HEIGHT > bottom {
             break;
         }
 
@@ -1568,7 +1754,7 @@ fn build_palette(layout: &Layout, editor: &Editor, view: &ViewState, out: &mut V
 /// what they do rather than naming it — the weight picker draws the weights,
 /// the style picker draws the dashes, the bold button is bold — and every row
 /// marks the value the selection currently has.
-fn build_properties(layout: &Layout, editor: &Editor, out: &mut Vec<Region>) {
+fn build_properties(layout: &Layout, editor: &Editor, view: &ViewState, out: &mut Vec<Region>) {
     use dc_model::{StrokeStyle, TextAlign, VerticalAlign};
 
     let panel = layout.right_panel;
@@ -1769,6 +1955,25 @@ fn build_properties(layout: &Layout, editor: &Editor, out: &mut Vec<Region>) {
     );
     y += ROW_HEIGHT + 4.0;
 
+    let family = editor.selection_font_family();
+    segmented(
+        &FONT_FAMILIES.map(|(label, name)| {
+            Segment::letter(
+                label,
+                Emphasis::default(),
+                UiAction::SetFontFamily(name),
+                // The markup layer lowercases font-family values on its way
+                // through CSS, so the comparison has to ignore case too.
+                family.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(name)),
+            )
+        }),
+        x0,
+        x1,
+        y,
+        out,
+    );
+    y += ROW_HEIGHT + 4.0;
+
     // Type size on the left, paragraph alignment on the right: two short rows
     // sharing a line, the way the editing bar packs them.
     segmented(
@@ -1827,6 +2032,87 @@ fn build_properties(layout: &Layout, editor: &Editor, out: &mut Vec<Region>) {
         UiAction::EditLabel,
     ));
     y += ROW_HEIGHT + PAD;
+
+    // --------------------------------------------------------------- link
+
+    // Actions are a documented shape property, not a line one, so this is
+    // offered only for a single selected shape.
+    if editor.selection.len() == 1 && editor.page().shape(&editor.selection[0]).is_some() {
+        heading("Link", &mut y, out);
+
+        let current = editor.selection_link();
+        let shown = if view.link_edit_focused {
+            view.link_edit.clone()
+        } else {
+            match &current {
+                Some(dc_model::Action::Url { url, .. }) => url.clone(),
+                Some(dc_model::Action::GotoPage { page_id }) => format!("Page: {page_id}"),
+                _ => String::new(),
+            }
+        };
+        out.push(Region {
+            rect: Rect::new(x0, y, x1, y + ROW_HEIGHT),
+            action: UiAction::FocusLinkField,
+            label: shown,
+            kind: RegionKind::TextField { focused: view.link_edit_focused, placeholder: "https://…" },
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        y += ROW_HEIGHT + 4.0;
+
+        if current.is_some() {
+            out.push(button(
+                Rect::new(x0, y, x1, y + ROW_HEIGHT),
+                "Remove Link",
+                UiAction::ClearLink,
+            ));
+            y += ROW_HEIGHT + 4.0;
+        }
+        y += PAD;
+
+        // ----------------------------------------------------- custom data
+
+        heading("Custom Data", &mut y, out);
+
+        for (i, entry) in editor.selection_custom_data().iter().enumerate() {
+            let key_focused = view.custom_data_focus == Some(CustomDataFocus::Key(i));
+            let value_focused = view.custom_data_focus == Some(CustomDataFocus::Value(i));
+            let key_shown = if key_focused { view.custom_data_edit.clone() } else { entry.key.clone() };
+            let value_shown =
+                if value_focused { view.custom_data_edit.clone() } else { entry.value.clone() };
+
+            out.push(Region {
+                rect: Rect::new(x0, y, half - 3.0, y + ROW_HEIGHT),
+                action: UiAction::FocusCustomDataKey(i),
+                label: key_shown,
+                kind: RegionKind::TextField { focused: key_focused, placeholder: "key" },
+                selected: false,
+                emphasis: Emphasis::default(),
+                label_size: None,
+            });
+            out.push(Region {
+                rect: Rect::new(half + 3.0, y, x1, y + ROW_HEIGHT),
+                action: UiAction::FocusCustomDataValue(i),
+                label: value_shown,
+                kind: RegionKind::TextField { focused: value_focused, placeholder: "value" },
+                selected: false,
+                emphasis: Emphasis::default(),
+                label_size: None,
+            });
+            y += ROW_HEIGHT + 4.0;
+
+            out.push(button(
+                Rect::new(x0, y, x1, y + ROW_HEIGHT),
+                "Remove Field",
+                UiAction::RemoveCustomData(i),
+            ));
+            y += ROW_HEIGHT + 4.0;
+        }
+
+        out.push(button(Rect::new(x0, y, x1, y + ROW_HEIGHT), "Add Field", UiAction::AddCustomData));
+        y += ROW_HEIGHT + PAD;
+    }
 
     finish_properties(editor, x0, x1, &mut y, out);
 }
@@ -2217,6 +2503,300 @@ fn drop_marker_x(rects: &[Rect], drag: TabDrag) -> Option<f64> {
         Some(rect) => rect.x0 - 2.0,
         None => rects[rects.len() - 1].x1 + 2.0,
     })
+}
+
+// -------------------------------------------------------------- find bar
+
+/// A floating bar for finding and replacing text in labels: a query field
+/// with Previous/Next, and a replacement field with a Replace button.
+/// Floats over the canvas near the top, out of the layers panel's way at
+/// the top right.
+fn build_find_bar(layout: &Layout, editor: &Editor, view: &ViewState, out: &mut Vec<Region>) -> Rect {
+    let width = 420.0_f64.min(layout.viewport.x - 24.0).max(240.0);
+    let x0 = ((layout.viewport.x - width) / 2.0).max(12.0);
+    let x1 = x0 + width;
+    let y0 = layout.menubar.y1 + 12.0;
+    let y1 = y0 + PAD * 2.0 + ROW_HEIGHT * 2.0 + 18.0 + 12.0;
+    let panel = Rect::new(x0, y0, x1, y1);
+
+    out.push(Region {
+        rect: panel,
+        action: UiAction::NoOp,
+        label: String::new(),
+        kind: RegionKind::Panel,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+
+    let px0 = x0 + PAD;
+    let px1 = x1 - PAD;
+    let mut y = y0 + PAD;
+
+    // Query field, with Previous/Next sharing its row.
+    let nav_width = 70.0;
+    out.push(Region {
+        rect: Rect::new(px0, y, px1 - nav_width * 2.0 - 8.0, y + ROW_HEIGHT),
+        action: UiAction::FocusFindQuery,
+        label: view.find_query.clone(),
+        kind: RegionKind::TextField { focused: view.find_query_focused, placeholder: "Find in labels" },
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    segmented(
+        &[
+            Segment::letter("Prev", Emphasis::default(), UiAction::FindPrevious, false),
+            Segment::letter("Next", Emphasis::default(), UiAction::FindNext, false),
+        ],
+        px1 - nav_width * 2.0 - 4.0,
+        px1,
+        y,
+        out,
+    );
+    y += ROW_HEIGHT + 4.0;
+
+    let matches = editor.find_matches(&view.find_query);
+    let count_label = if view.find_query.trim().is_empty() {
+        String::new()
+    } else if matches.is_empty() {
+        "No matches".to_string()
+    } else {
+        format!("Match {} of {}", view.find_match_index.min(matches.len() - 1) + 1, matches.len())
+    };
+    out.push(Region {
+        rect: Rect::new(px0, y, px1, y + 18.0),
+        action: UiAction::NoOp,
+        label: count_label,
+        kind: RegionKind::Heading,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    y += 18.0 + 8.0;
+
+    // Replacement field, with Replace sharing its row.
+    let replace_width = 80.0;
+    out.push(Region {
+        rect: Rect::new(px0, y, px1 - replace_width - 4.0, y + ROW_HEIGHT),
+        action: UiAction::FocusFindReplacement,
+        label: view.find_replacement.clone(),
+        kind: RegionKind::TextField { focused: view.find_replacement_focused, placeholder: "Replace with" },
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    out.push(button(
+        Rect::new(px1 - replace_width, y, px1, y + ROW_HEIGHT),
+        "Replace",
+        UiAction::ReplaceCurrentMatch,
+    ));
+
+    panel
+}
+
+// ----------------------------------------------------------- layers panel
+
+/// A floating panel listing the page's layers: visibility, lock, delete, and
+/// moving the current selection into one. Floats over the canvas rather than
+/// claiming a `Layout` region, so opening it never disturbs the camera.
+fn build_layers_panel(layout: &Layout, editor: &Editor, out: &mut Vec<Region>) -> Rect {
+    let width = 240.0_f64.min(layout.viewport.x - 24.0).max(160.0);
+    let x1 = layout.viewport.x - 12.0;
+    let x0 = (x1 - width).max(12.0);
+    let y0 = layout.menubar.y1 + 12.0;
+    let max_y1 = (layout.tabs.y0 - 12.0).max(y0 + 40.0);
+
+    let layers = editor.layers();
+    let per_entry = ROW_HEIGHT + 4.0 + ROW_HEIGHT + 8.0;
+    let content_height = PAD * 2.0 + 22.0 + layers.len() as f64 * per_entry + ROW_HEIGHT;
+    let y1 = (y0 + content_height).min(max_y1);
+    let panel = Rect::new(x0, y0, x1, y1);
+
+    out.push(Region {
+        rect: panel,
+        action: UiAction::NoOp,
+        label: String::new(),
+        kind: RegionKind::Panel,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+
+    let px0 = x0 + PAD;
+    let px1 = x1 - PAD;
+    let mut y = y0 + PAD;
+
+    out.push(Region {
+        rect: Rect::new(px0, y, px1, y + 18.0),
+        action: UiAction::NoOp,
+        label: "Layers".to_string(),
+        kind: RegionKind::Heading,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    y += 22.0;
+
+    let has_selection = !editor.selection.is_empty();
+    for layer in layers {
+        if y + ROW_HEIGHT > panel.y1 {
+            break;
+        }
+        out.push(Region {
+            rect: Rect::new(px0, y, px1, y + ROW_HEIGHT),
+            action: UiAction::NoOp,
+            label: layer.title.clone().unwrap_or_else(|| layer.id.clone()),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        y += ROW_HEIGHT + 4.0;
+        if y + ROW_HEIGHT > panel.y1 {
+            break;
+        }
+
+        let mut segments = vec![
+            Segment::letter(
+                "Vis",
+                Emphasis::default(),
+                UiAction::ToggleLayerVisibility(layer.id.clone()),
+                layer.is_visible(),
+            ),
+            Segment::letter(
+                "Lock",
+                Emphasis::default(),
+                UiAction::ToggleLayerLock(layer.id.clone()),
+                layer.is_locked(),
+            ),
+            Segment::letter("Del", Emphasis::default(), UiAction::DeleteLayer(layer.id.clone()), false),
+        ];
+        if has_selection {
+            segments.insert(
+                0,
+                Segment::letter(
+                    "Use",
+                    Emphasis::default(),
+                    UiAction::MoveSelectionToLayer(layer.id.clone()),
+                    false,
+                ),
+            );
+        }
+        segmented(&segments, px0, px1, y, out);
+        y += ROW_HEIGHT + 8.0;
+    }
+
+    if y + ROW_HEIGHT <= panel.y1 {
+        out.push(button(Rect::new(px0, y, px1, y + ROW_HEIGHT), "Add Layer", UiAction::AddLayer));
+    }
+
+    panel
+}
+
+// --------------------------------------------------------- settings screen
+
+/// Height of one settings row.
+// ------------------------------------------------------- template gallery
+
+/// Height of one template's row: its name and description stacked.
+const TEMPLATE_ROW: f64 = 56.0;
+const TEMPLATE_GALLERY_WIDTH: f64 = 440.0;
+
+/// Lays out the "New from Template" gallery as a modal sheet, the same
+/// construction `build_settings` uses: a scrim that closes it on a miss,
+/// and a sheet sized to its content and clamped to the window.
+fn build_template_gallery(layout: &Layout, out: &mut Vec<Region>) -> Rect {
+    let window = Rect::new(0.0, 0.0, layout.viewport.x, layout.viewport.y);
+    out.push(Region {
+        rect: window,
+        action: UiAction::CloseTemplateGallery,
+        label: String::new(),
+        kind: RegionKind::Scrim,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+
+    let width = TEMPLATE_GALLERY_WIDTH.clamp(1.0, layout.viewport.x - 40.0);
+    let content_height =
+        16.0 + 24.0 + 10.0 + crate::templates::ALL.len() as f64 * (TEMPLATE_ROW + 8.0) + 16.0 + ROW_HEIGHT + 16.0;
+    let height = content_height.clamp(1.0, layout.viewport.y - 40.0);
+    let sheet = Rect::from_center_size(
+        kurbo::Point::new(layout.viewport.x / 2.0, layout.viewport.y / 2.0),
+        (width, height),
+    );
+    out.push(Region {
+        rect: sheet,
+        action: UiAction::NoOp,
+        label: String::new(),
+        kind: RegionKind::Sheet,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+
+    let x0 = sheet.x0 + 20.0;
+    let x1 = sheet.x1 - 20.0;
+    let mut y = sheet.y0 + 16.0;
+
+    out.push(Region {
+        rect: Rect::new(x0, y, x1, y + 24.0),
+        action: UiAction::NoOp,
+        label: "New from Template".into(),
+        kind: RegionKind::Heading,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    y += 34.0;
+
+    let content_limit = sheet.y1 - 16.0 - ROW_HEIGHT - 12.0;
+    for (i, t) in crate::templates::ALL.iter().enumerate() {
+        if y + TEMPLATE_ROW > content_limit {
+            break;
+        }
+        // The whole row is one clickable surface; the name and description
+        // are drawn over it as plain, non-clickable text, the same way the
+        // layers panel draws a title over its own backdrop.
+        out.push(Region {
+            rect: Rect::new(x0, y, x1, y + TEMPLATE_ROW),
+            action: UiAction::NewFromTemplate(i),
+            label: String::new(),
+            kind: RegionKind::Button,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        out.push(Region {
+            rect: Rect::new(x0 + 12.0, y + 8.0, x1 - 12.0, y + 28.0),
+            action: UiAction::NoOp,
+            label: t.name.to_string(),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        out.push(Region {
+            rect: Rect::new(x0 + 12.0, y + 30.0, x1 - 12.0, y + 48.0),
+            action: UiAction::NoOp,
+            label: t.description.to_string(),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        y += TEMPLATE_ROW + 8.0;
+    }
+
+    let footer = sheet.y1 - 16.0 - ROW_HEIGHT;
+    out.push(button(
+        Rect::new(x1 - 90.0, footer, x1, footer + ROW_HEIGHT),
+        "Cancel",
+        UiAction::CloseTemplateGallery,
+    ));
+
+    sheet
 }
 
 // --------------------------------------------------------- settings screen
@@ -2636,6 +3216,67 @@ mod tests {
         Chrome::build_for(window(), e, &Metrics::default(), &view, None, None, None)
     }
 
+    fn chrome_with_search(e: &Editor, query: &str) -> Chrome {
+        let view = ViewState { palette_search: query.to_string(), ..Default::default() };
+        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None, None)
+    }
+
+    fn shape_tiles(c: &Chrome) -> Vec<&ShapeType> {
+        c.regions
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RegionKind::ShapeTile(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_search_field_is_always_in_the_palette() {
+        let c = chrome(&editor());
+        let field = c
+            .regions
+            .iter()
+            .find(|r| matches!(r.kind, RegionKind::TextField { .. }))
+            .expect("a search field");
+        assert_eq!(field.action, UiAction::FocusPaletteSearch);
+    }
+
+    #[test]
+    fn searching_finds_shapes_across_every_library() {
+        // "Process" lives in Flowchart, "Terminator" in Flowchart too, but
+        // the point is finding a shape without knowing which library it is
+        // in — search a term and get hits regardless of library.
+        let c = chrome_with_search(&editor(), "star");
+        let tiles = shape_tiles(&c);
+        assert!(!tiles.is_empty(), "expected at least one match for \"star\"");
+        for t in &tiles {
+            assert!(
+                t.display_name().to_ascii_lowercase().contains("star"),
+                "{} does not match the query",
+                t.display_name()
+            );
+        }
+
+        // With a query active, the library tabs are not shown at all —
+        // there is nothing to browse by library while searching.
+        assert!(!c.regions.iter().any(|r| matches!(r.kind, RegionKind::LibraryTab { .. })));
+    }
+
+    #[test]
+    fn an_empty_search_shows_the_current_library_as_usual() {
+        let e = editor();
+        let with_query = chrome_with_search(&e, "");
+        let without = chrome(&e);
+        assert_eq!(shape_tiles(&with_query).len(), shape_tiles(&without).len());
+    }
+
+    #[test]
+    fn a_search_with_no_matches_offers_no_tiles() {
+        let c = chrome_with_search(&editor(), "zzzznotashape");
+        assert!(shape_tiles(&c).is_empty());
+    }
+
     #[test]
     fn layout_partitions_the_window_without_overlap() {
         let l = Layout::compute(window(), &Metrics::default());
@@ -3030,6 +3671,230 @@ mod tests {
         assert!(!select.selected);
     }
 
+    #[test]
+    fn the_pen_tool_is_in_the_tool_strip() {
+        let mut e = editor();
+        e.tool = Tool::Freehand;
+        let c = chrome(&e);
+        let pen = c
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::SelectTool(Tool::Freehand))
+            .expect("a pen tool button");
+        assert!(pen.selected);
+    }
+
+    // ----------------------------------------------------------------- link
+
+    #[test]
+    fn the_link_field_is_offered_for_a_single_shape_only() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        let c = chrome(&e);
+        assert!(c.regions.iter().any(|r| r.action == UiAction::FocusLinkField));
+    }
+
+    #[test]
+    fn the_link_field_is_absent_with_nothing_selected() {
+        let c = chrome(&editor());
+        assert!(!c.regions.iter().any(|r| r.action == UiAction::FocusLinkField));
+    }
+
+    #[test]
+    fn the_link_field_shows_the_shapes_current_link() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        e.set_link_url("https://example.com");
+        let c = chrome(&e);
+        let field = c.regions.iter().find(|r| r.action == UiAction::FocusLinkField).unwrap();
+        assert_eq!(field.label, "https://example.com");
+
+        let remove = c.regions.iter().find(|r| r.action == UiAction::ClearLink);
+        assert!(remove.is_some(), "a link that exists should offer a way to remove it");
+    }
+
+    #[test]
+    fn the_link_field_shows_the_live_edit_while_focused() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        e.set_link_url("https://example.com");
+
+        let view = ViewState { link_edit_focused: true, link_edit: "https://typing".into(), ..Default::default() };
+        let c = Chrome::build_for(window(), &e, &Metrics::default(), &view, None, None, None);
+        let field = c.regions.iter().find(|r| r.action == UiAction::FocusLinkField).unwrap();
+        assert_eq!(field.label, "https://typing", "the field shows what is being typed, not the saved value");
+        assert_eq!(field.kind, RegionKind::TextField { focused: true, placeholder: "https://…" });
+    }
+
+    // --------------------------------------------------------- custom data
+
+    #[test]
+    fn custom_data_rows_are_offered_for_a_single_shape() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        e.add_custom_data();
+        e.set_custom_data_key(0, "owner");
+        e.set_custom_data_value(0, "ops");
+
+        let c = chrome(&e);
+        let key = c.regions.iter().find(|r| r.action == UiAction::FocusCustomDataKey(0)).unwrap();
+        assert_eq!(key.label, "owner");
+        let value = c.regions.iter().find(|r| r.action == UiAction::FocusCustomDataValue(0)).unwrap();
+        assert_eq!(value.label, "ops");
+        assert!(c.regions.iter().any(|r| r.action == UiAction::RemoveCustomData(0)));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::AddCustomData));
+    }
+
+    #[test]
+    fn custom_data_is_absent_with_nothing_selected() {
+        let c = chrome(&editor());
+        assert!(!c.regions.iter().any(|r| r.action == UiAction::AddCustomData));
+    }
+
+    #[test]
+    fn a_focused_custom_data_field_shows_its_live_edit() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        e.selection = vec![id];
+        e.add_custom_data();
+        e.set_custom_data_key(0, "owner");
+
+        let view = ViewState {
+            custom_data_focus: Some(CustomDataFocus::Key(0)),
+            custom_data_edit: "typing".into(),
+            ..Default::default()
+        };
+        let c = Chrome::build_for(window(), &e, &Metrics::default(), &view, None, None, None);
+        let key = c.regions.iter().find(|r| r.action == UiAction::FocusCustomDataKey(0)).unwrap();
+        assert_eq!(key.label, "typing");
+        assert_eq!(key.kind, RegionKind::TextField { focused: true, placeholder: "key" });
+    }
+
+    // ------------------------------------------------------------- layers
+
+    fn chrome_with_layers_panel(e: &Editor) -> Chrome {
+        let view = ViewState { layers_panel_open: true, ..Default::default() };
+        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None, None)
+    }
+
+    #[test]
+    fn the_layers_panel_is_absent_until_opened() {
+        let c = chrome(&editor());
+        assert!(c.layers_panel.is_none());
+        assert!(!c.regions.iter().any(|r| r.action == UiAction::AddLayer));
+    }
+
+    #[test]
+    fn opening_the_layers_panel_shows_its_controls() {
+        let mut e = editor();
+        let id = e.add_layer();
+        let c = chrome_with_layers_panel(&e);
+
+        assert!(c.layers_panel.is_some());
+        assert!(c.regions.iter().any(|r| r.action == UiAction::AddLayer));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::ToggleLayerVisibility(id.clone())));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::ToggleLayerLock(id.clone())));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::DeleteLayer(id.clone())));
+    }
+
+    #[test]
+    fn the_move_selection_action_is_offered_only_with_a_selection() {
+        let mut e = editor();
+        let id = e.add_layer();
+        let c = chrome_with_layers_panel(&e);
+        assert!(!c.regions.iter().any(|r| r.action == UiAction::MoveSelectionToLayer(id.clone())));
+
+        let shape = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        e.selection = vec![shape];
+        let c = chrome_with_layers_panel(&e);
+        assert!(c.regions.iter().any(|r| r.action == UiAction::MoveSelectionToLayer(id.clone())));
+    }
+
+    #[test]
+    fn the_layers_panel_is_opaque_so_it_does_not_leak_clicks_to_the_canvas() {
+        let e = editor();
+        let c = chrome_with_layers_panel(&e);
+        let panel = c.layers_panel.unwrap();
+        assert!(!c.is_over_canvas(panel.center()));
+    }
+
+    #[test]
+    fn visibility_and_lock_buttons_reflect_the_layers_state() {
+        let mut e = editor();
+        let id = e.add_layer();
+        e.toggle_layer_lock(&id);
+        let c = chrome_with_layers_panel(&e);
+
+        let vis = c.regions.iter().find(|r| r.action == UiAction::ToggleLayerVisibility(id.clone())).unwrap();
+        assert_eq!(vis.kind, RegionKind::Choice { active: true }, "visible by default");
+
+        let lock = c.regions.iter().find(|r| r.action == UiAction::ToggleLayerLock(id.clone())).unwrap();
+        assert_eq!(lock.kind, RegionKind::Choice { active: true }, "locked just now");
+    }
+
+    // --------------------------------------------------------- find and replace
+
+    fn chrome_with_find(e: &Editor, query: &str) -> Chrome {
+        let view = ViewState { find_open: true, find_query: query.to_string(), ..Default::default() };
+        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None, None)
+    }
+
+    #[test]
+    fn the_find_bar_is_absent_until_opened() {
+        let c = chrome(&editor());
+        assert!(c.find_bar.is_none());
+        assert!(!c.regions.iter().any(|r| r.action == UiAction::FocusFindQuery));
+    }
+
+    #[test]
+    fn opening_find_shows_its_controls() {
+        let c = chrome_with_find(&editor(), "");
+        assert!(c.find_bar.is_some());
+        assert!(c.regions.iter().any(|r| r.action == UiAction::FocusFindQuery));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::FocusFindReplacement));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::FindNext));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::FindPrevious));
+        assert!(c.regions.iter().any(|r| r.action == UiAction::ReplaceCurrentMatch));
+    }
+
+    #[test]
+    fn the_match_count_reflects_the_query() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&id) {
+            shape.text = Some(dc_model::Text::new("Approval"));
+        }
+
+        let empty = chrome_with_find(&e, "");
+        let heading = |c: &Chrome| {
+            c.regions
+                .iter()
+                .find(|r| {
+                    matches!(r.kind, RegionKind::Heading)
+                        && (r.label.starts_with("Match") || r.label == "No matches")
+                })
+                .map(|r| r.label.clone())
+        };
+        assert_eq!(heading(&empty), None, "an empty query shows no count");
+
+        let no_match = chrome_with_find(&e, "zzz");
+        assert_eq!(heading(&no_match), Some("No matches".to_string()));
+
+        let one_match = chrome_with_find(&e, "approval");
+        assert_eq!(heading(&one_match), Some("Match 1 of 1".to_string()));
+    }
+
+    #[test]
+    fn the_find_bar_is_opaque_so_it_does_not_leak_clicks_to_the_canvas() {
+        let c = chrome_with_find(&editor(), "");
+        let bar = c.find_bar.unwrap();
+        assert!(!c.is_over_canvas(bar.center()));
+    }
+
     // ---------------------------------------------------------- hit testing
 
     #[test]
@@ -3338,6 +4203,32 @@ mod tests {
             .find(|r| r.action == UiAction::ToggleText(TextToggle::Italic))
             .unwrap();
         assert_eq!(italic.kind, RegionKind::Choice { active: false });
+    }
+
+    #[test]
+    fn the_font_family_buttons_mark_the_selections_shared_family() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 40.0));
+        if let Some(shape) = e.package.document.pages[0].shape_mut(&id) {
+            shape.text = Some(dc_model::Text::new("label"));
+        }
+        e.selection = vec![id.clone()];
+        e.set_font_family("Georgia");
+
+        let c = chrome(&e);
+        let serif = c
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::SetFontFamily("Georgia"))
+            .unwrap();
+        assert_eq!(serif.kind, RegionKind::Choice { active: true });
+
+        let sans = c
+            .regions
+            .iter()
+            .find(|r| r.action == UiAction::SetFontFamily("Liberation Sans"))
+            .unwrap();
+        assert_eq!(sans.kind, RegionKind::Choice { active: false });
     }
 
     /// The emphasis on the control carrying an action.
@@ -3912,6 +4803,53 @@ mod tests {
         let c = chrome(&editor());
         assert!(c.settings_sheet.is_none());
         assert!(!c.regions.iter().any(|r| r.kind == RegionKind::Scrim));
+    }
+
+    // ------------------------------------------------------- template gallery
+
+    fn gallery_chrome(e: &Editor) -> Chrome {
+        let view = ViewState { template_gallery_open: true, ..Default::default() };
+        Chrome::build_for(window(), e, &Metrics::default(), &view, None, None, None)
+    }
+
+    #[test]
+    fn the_template_gallery_is_absent_until_opened() {
+        let c = chrome(&editor());
+        assert!(c.template_gallery.is_none());
+        assert!(!c.regions.iter().any(|r| matches!(r.action, UiAction::NewFromTemplate(_))));
+    }
+
+    #[test]
+    fn opening_the_gallery_lists_every_template() {
+        let c = gallery_chrome(&editor());
+        assert!(c.template_gallery.is_some());
+        for i in 0..crate::templates::ALL.len() {
+            assert!(
+                c.regions.iter().any(|r| r.action == UiAction::NewFromTemplate(i)),
+                "template {i} is not offered"
+            );
+        }
+    }
+
+    #[test]
+    fn every_templates_name_and_description_are_shown() {
+        let c = gallery_chrome(&editor());
+        for t in crate::templates::ALL {
+            assert!(c.regions.iter().any(|r| r.label == t.name), "{} not shown", t.name);
+            assert!(
+                c.regions.iter().any(|r| r.label == t.description),
+                "{}'s description not shown",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_gallery_is_opaque_and_modal() {
+        let c = gallery_chrome(&editor());
+        let sheet = c.template_gallery.unwrap();
+        assert!(!c.is_over_canvas(sheet.center()));
+        assert!(c.regions.iter().any(|r| r.kind == RegionKind::Scrim));
     }
 
     #[test]

@@ -454,6 +454,52 @@ pub struct ImageRef {
     pub url: Option<String>,
 }
 
+/// An action wired to a shape: a hyperlink, a jump to another page or
+/// document, or a layer-visibility toggle.
+///
+/// Source: `reference-si` on developer.lucid.co, which documents these six
+/// action types and the fields each one carries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Action {
+    /// Opens a URL.
+    #[serde(rename_all = "camelCase")]
+    Url {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_window: Option<bool>,
+    },
+    /// Jumps to a page in this document.
+    #[serde(rename_all = "camelCase")]
+    GotoPage { page_id: String },
+    /// Jumps to a page in another document.
+    #[serde(rename_all = "camelCase")]
+    GotoDocument {
+        document_id: String,
+        page_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_window: Option<bool>,
+    },
+    /// Hides the named layers.
+    #[serde(rename_all = "camelCase")]
+    HideLayer { layers: Vec<String> },
+    /// Shows the named layers.
+    #[serde(rename_all = "camelCase")]
+    ShowLayer { layers: Vec<String> },
+    /// Flips the named layers between hidden and shown.
+    #[serde(rename_all = "camelCase")]
+    ToggleLayer { layers: Vec<String> },
+}
+
+/// A key-value pair attached to a shape, page, or layer.
+///
+/// Source: `reference-si`, the "Custom Data" type.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomDataEntry {
+    pub key: String,
+    pub value: String,
+}
+
 /// A shape on a page.
 ///
 /// Fields published as common to most shapes are typed. The handful of
@@ -478,6 +524,13 @@ pub struct Shape {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z_index: Option<i64>,
+    /// Navigation and layer-visibility actions wired to the shape, for
+    /// example a hyperlink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<Action>>,
+    /// Arbitrary key-value pairs attached to the shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_data: Option<Vec<CustomDataEntry>>,
 
     /// Required on the image block, which carries its stroke outside `style`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -600,6 +653,8 @@ impl Shape {
             opacity: None,
             note: None,
             z_index: None,
+            actions: None,
+            custom_data: None,
             stroke: None,
             image: None,
             right_facing: None,
@@ -938,17 +993,69 @@ mod tests {
         let json = r#"{
             "id":"s1","type":"rectangle",
             "boundingBox":{"x":0,"y":0,"w":10,"h":10},
-            "actions":[{"type":"url","url":"https://example.com"}],
-            "customData":[{"key":"owner","value":"ops"}],
             "someFutureField":{"nested":[1,2,3]}
         }"#;
         let s: Shape = serde_json::from_str(json).unwrap();
-        assert!(s.extra.contains_key("actions"));
-        assert!(s.extra.contains_key("customData"));
+        assert!(s.extra.contains_key("someFutureField"));
 
         let back = serde_json::to_value(&s).unwrap();
         assert_eq!(back["someFutureField"]["nested"][2], 3);
+    }
+
+    #[test]
+    fn a_url_action_is_typed_rather_than_opaque() {
+        let json = r#"{
+            "id":"s1","type":"rectangle",
+            "boundingBox":{"x":0,"y":0,"w":10,"h":10},
+            "actions":[{"type":"url","url":"https://example.com","newWindow":true}]
+        }"#;
+        let s: Shape = serde_json::from_str(json).unwrap();
+        assert!(!s.extra.contains_key("actions"), "it should be a typed field now");
+        assert_eq!(
+            s.actions,
+            Some(vec![Action::Url { url: "https://example.com".into(), new_window: Some(true) }])
+        );
+
+        let back = serde_json::to_value(&s).unwrap();
+        assert_eq!(back["actions"][0]["type"], "url");
         assert_eq!(back["actions"][0]["url"], "https://example.com");
+        assert_eq!(back["actions"][0]["newWindow"], true);
+    }
+
+    #[test]
+    fn every_documented_action_type_round_trips() {
+        for json in [
+            r#"{"type":"url","url":"https://example.com"}"#,
+            r#"{"type":"gotoPage","pageId":"p1"}"#,
+            r#"{"type":"gotoDocument","documentId":"d1","pageId":"p1"}"#,
+            r#"{"type":"hideLayer","layers":["l1","l2"]}"#,
+            r#"{"type":"showLayer","layers":["l1"]}"#,
+            r#"{"type":"toggleLayer","layers":["l1"]}"#,
+        ] {
+            let action: Action = serde_json::from_str(json).unwrap();
+            let back = serde_json::to_value(&action).unwrap();
+            let original: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert_eq!(back, original, "{json} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn custom_data_is_typed_rather_than_opaque() {
+        let json = r#"{
+            "id":"s1","type":"rectangle",
+            "boundingBox":{"x":0,"y":0,"w":10,"h":10},
+            "customData":[{"key":"owner","value":"ops"}]
+        }"#;
+        let s: Shape = serde_json::from_str(json).unwrap();
+        assert!(!s.extra.contains_key("customData"));
+        assert_eq!(
+            s.custom_data,
+            Some(vec![CustomDataEntry { key: "owner".into(), value: "ops".into() }])
+        );
+
+        let back = serde_json::to_value(&s).unwrap();
+        assert_eq!(back["customData"][0]["key"], "owner");
+        assert_eq!(back["customData"][0]["value"], "ops");
     }
 
     #[test]

@@ -18,7 +18,7 @@
 
 use crate::editor::{Align, Editor, SelectBy, TextToggle, Tool};
 use crate::settings::Settings;
-use crate::ui::{ContextTarget, UiAction};
+use crate::ui::{ContextTarget, CustomDataFocus, UiAction};
 use dc_model::{ShapeLibrary, ShapeType};
 
 /// The view-level state the menus reflect, which lives in the window layer
@@ -33,6 +33,31 @@ pub struct ViewState {
     pub library: ShapeLibrary,
     /// Whether the settings screen is up.
     pub settings_open: bool,
+    /// The live query over the palette. Empty means "browse the current
+    /// library normally"; otherwise every library is searched at once.
+    pub palette_search: String,
+    /// Whether the search field is currently taking keystrokes.
+    pub palette_search_focused: bool,
+    /// The URL being typed for the selected shape's link.
+    pub link_edit: String,
+    /// Whether the link field is currently taking keystrokes.
+    pub link_edit_focused: bool,
+    /// Which custom-data field is currently taking keystrokes, if any.
+    pub custom_data_focus: Option<CustomDataFocus>,
+    /// The live text of the focused custom-data field.
+    pub custom_data_edit: String,
+    /// Whether the layers panel is showing.
+    pub layers_panel_open: bool,
+    /// Whether the find bar is showing.
+    pub find_open: bool,
+    pub find_query: String,
+    pub find_query_focused: bool,
+    pub find_replacement: String,
+    pub find_replacement_focused: bool,
+    /// Which match Next/Previous is currently on.
+    pub find_match_index: usize,
+    /// Whether the "New from Template" gallery is showing.
+    pub template_gallery_open: bool,
 }
 
 /// The key a menu item's shortcut names.
@@ -215,6 +240,7 @@ fn file_menu(editor: &Editor) -> Menu {
         title: "File".into(),
         items: vec![
             MenuItem::new("New", "⌘N", UiAction::NewDocument),
+            MenuItem::new("New from Template…", "", UiAction::OpenTemplateGallery),
             MenuItem::new("Open…", "⌘O", UiAction::Open),
             MenuItem::new("Import Visio…", "", UiAction::ImportVsdx),
             MenuItem::separator(),
@@ -261,6 +287,8 @@ fn edit_menu(editor: &Editor) -> Menu {
             MenuItem::new("Edit Label", "Enter", UiAction::EditLabel).enabled_when(has_selection),
             MenuItem::separator(),
             MenuItem::new("Rename Page…", "", UiAction::RenamePage(editor.page_index)),
+            MenuItem::separator(),
+            MenuItem::new("Find…", "⌘F", UiAction::ToggleFind),
         ],
     }
 }
@@ -415,6 +443,8 @@ fn view_menu(editor: &Editor, view: &ViewState) -> Menu {
             MenuItem::new("Zoom In", "⌘+", UiAction::ZoomIn),
             MenuItem::new("Zoom Out", "⌘-", UiAction::ZoomOut),
             MenuItem::new("Zoom to Fit", "⌘1", UiAction::ZoomFit),
+            MenuItem::new("Zoom to Selection", "", UiAction::ZoomToSelection)
+                .enabled_when(!editor.selection.is_empty()),
             MenuItem::new("Actual Size", "⌘0", UiAction::ActualSize),
             MenuItem::separator(),
             MenuItem::check("Show Grid", "", UiAction::ToggleGrid, view.settings.show_grid),
@@ -428,6 +458,8 @@ fn view_menu(editor: &Editor, view: &ViewState) -> Menu {
             ),
             MenuItem::separator(),
             MenuItem::check("Dark Theme", "", UiAction::ToggleTheme, view.settings.dark_theme),
+            MenuItem::separator(),
+            MenuItem::check("Layers", "", UiAction::ToggleLayersPanel, view.layers_panel_open),
         ],
     }
 }
@@ -484,6 +516,11 @@ fn selection_context_menu(editor: &Editor) -> Menu {
                 .enabled_when(editor.has_copied_style()),
             MenuItem::separator(),
             MenuItem::new("Edit Label", "Enter", UiAction::EditLabel),
+            MenuItem::separator(),
+            MenuItem::new("Open Link", "", UiAction::OpenLink)
+                .enabled_when(editor.selection_link().is_some()),
+            MenuItem::separator(),
+            MenuItem::new("Zoom to Selection", "", UiAction::ZoomToSelection),
             MenuItem::separator(),
             MenuItem::new("Bring to Front", "Shift ⌘]", UiAction::BringToFront),
             MenuItem::new("Bring Forward", "⌘]", UiAction::BringForward),
@@ -669,6 +706,38 @@ mod tests {
                 library.display_name()
             );
         }
+    }
+
+    #[test]
+    fn zoom_to_selection_is_disabled_with_nothing_selected() {
+        let mut e = editor();
+        assert!(!item(&built(&e), "View", "Zoom to Selection").enabled);
+
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        e.selection = vec![id];
+        assert!(item(&built(&e), "View", "Zoom to Selection").enabled);
+    }
+
+    #[test]
+    fn zoom_to_selection_is_in_the_shape_context_menu() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        e.selection = vec![id];
+        let menu = context_menu(&e, ContextTarget::Canvas);
+        assert!(menu.items.iter().any(|i| i.label == "Zoom to Selection" && i.enabled));
+    }
+
+    #[test]
+    fn open_link_is_disabled_without_a_link_and_enabled_with_one() {
+        let mut e = editor();
+        let id = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        e.selection = vec![id];
+        let menu = context_menu(&e, ContextTarget::Canvas);
+        assert!(!menu.items.iter().find(|i| i.label == "Open Link").unwrap().enabled);
+
+        e.set_link_url("https://example.com");
+        let menu = context_menu(&e, ContextTarget::Canvas);
+        assert!(menu.items.iter().find(|i| i.label == "Open Link").unwrap().enabled);
     }
 
     #[test]
