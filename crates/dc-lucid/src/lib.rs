@@ -294,6 +294,92 @@ mod tests {
     }
 
     #[test]
+    fn every_shape_type_survives_a_package_round_trip() {
+        use dc_model::{BoundingBox, Page, Shape, ShapeLibrary, ShapeType};
+
+        // Every library, published and extension alike. The extension types
+        // carry names this build invented, so a round trip is the thing most
+        // worth proving about them.
+        let mut page = Page::new("p1", "All shapes");
+        let all: Vec<ShapeType> =
+            ShapeLibrary::ALL.iter().flat_map(|l| l.types()).collect();
+        assert!(all.len() > 100, "the fixture should cover every library, got {}", all.len());
+
+        for (i, t) in all.iter().enumerate() {
+            let (w, h) = t.default_size();
+            page.add_shape(Shape::new(
+                format!("s{i}"),
+                t.clone(),
+                BoundingBox::new(i as f64 * 10.0, 0.0, w, h),
+            ));
+        }
+
+        let mut document = dc_model::Document::default();
+        document.pages = vec![page];
+        let package = LucidPackage::new(document);
+
+        let mut buf = Cursor::new(Vec::new());
+        package.write(&mut buf).unwrap();
+        let back = LucidPackage::from_bytes(&buf.into_inner()).unwrap();
+
+        let got: Vec<ShapeType> = back.document.pages[0]
+            .shapes()
+            .iter()
+            .map(|s| s.shape_type.clone())
+            .collect();
+        assert_eq!(got, all, "a shape type changed on the way through");
+        assert!(
+            got.iter().all(|t| t.is_known()),
+            "a declared type came back as an unrecognised string"
+        );
+    }
+
+    #[test]
+    fn the_extension_shape_types_are_namespaced() {
+        use dc_model::ShapeLibrary;
+        // The published libraries must keep their published strings, and the
+        // ones this build added must be prefixed so they cannot collide with
+        // a library Lucid publishes later.
+        let published = [
+            ShapeLibrary::Standard,
+            ShapeLibrary::Shape,
+            ShapeLibrary::Flowchart,
+            ShapeLibrary::Container,
+            ShapeLibrary::Bpmn,
+            ShapeLibrary::Table,
+            ShapeLibrary::Lucidspark,
+            ShapeLibrary::Cloud,
+        ];
+        for library in published {
+            for t in library.types() {
+                assert!(
+                    !t.as_str().starts_with("dc"),
+                    "{} is published and must keep its own name",
+                    t.as_str()
+                );
+            }
+        }
+
+        for library in [
+            ShapeLibrary::Uml,
+            ShapeLibrary::Erd,
+            ShapeLibrary::Network,
+            ShapeLibrary::Wireframe,
+            ShapeLibrary::Chart,
+        ] {
+            let types = library.types();
+            assert!(!types.is_empty(), "{library:?} should declare shapes");
+            for t in types {
+                assert!(
+                    t.as_str().starts_with("dc"),
+                    "{} is an extension and must be namespaced",
+                    t.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn missing_document_is_reported_clearly() {
         let mut buf = Cursor::new(Vec::new());
         {

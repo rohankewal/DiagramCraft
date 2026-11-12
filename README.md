@@ -235,7 +235,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 1063 tests
+cargo test --workspace     # 1065 tests
 ```
 
 ## Scope
