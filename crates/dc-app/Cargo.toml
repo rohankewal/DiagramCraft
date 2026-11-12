@@ -38,6 +38,11 @@ serde_json = { workspace = true }
 # the in-window menu bar, which is why this is not a workspace dependency.
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.19", default-features = false }
+# macOS has no per-window icon, so the dock icon is set on the application
+# itself. These are already in the tree by way of winit.
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.2", features = ["NSData"] }
+objc2 = "0.5"
 
 [dev-dependencies]
 tempfile = "3"

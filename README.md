@@ -1,5 +1,7 @@
 # DiagramCraft
 
+<img src="assets/icon.png" alt="" width="104" align="left">
+
 **Open-source diagramming, rebuilt in pure Rust.**
 
 A desktop diagramming editor that reads and writes the Lucid Standard Import
@@ -76,6 +78,17 @@ git clone https://github.com/diagramcraft/diagramcraft
 cd diagramcraft
 cargo run --release
 ```
+
+On macOS the bare binary works and sets its own dock icon. For a
+double-clickable `DiagramCraft.app` with the icon in Finder:
+
+```sh
+cargo build --release
+scripts/bundle-macos.sh
+```
+
+The bundle is unsigned, so another machine will refuse to open it until it is
+signed and notarised.
 
 ## Usage
 
@@ -158,6 +171,17 @@ are saved as you change them and read back at launch.
 | `⌘`-Home / End | jump to the start or end |
 | Double-click a page tab | rename the page |
 
+## The icon
+
+The icon is drawn, not stored: `crates/dc-app/src/icon.rs` composes it from the
+same geometry that draws a terminator and a decision on the canvas, so the mark
+cannot drift from what the program renders. Regenerate every size with:
+
+```sh
+scripts/make-icons.sh          # PNG set and, on macOS, the .icns
+diagramcraft icon out.png 512  # or one size, anywhere
+```
+
 ## Architecture
 
 Six crates, each independently testable:
@@ -177,7 +201,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 800 tests
+cargo test --workspace     # 923 tests
 ```
 
 ## Scope

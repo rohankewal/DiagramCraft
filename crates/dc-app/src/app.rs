@@ -240,6 +240,36 @@ impl App {
         event_loop.run_app(&mut self)
     }
 
+    /// Puts the icon on the dock, where the platform has one.
+    ///
+    /// macOS has no per-window icon — `set_window_icon` is a no-op there —
+    /// and an unbundled binary shows a generic placeholder until the
+    /// application sets one for itself.
+    #[cfg(target_os = "macos")]
+    fn set_dock_icon(&self) {
+        use objc2::ClassType;
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::{MainThreadMarker, NSData};
+
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let data = NSData::with_bytes(crate::icon::EMBEDDED_PNG);
+        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            log::warn!("the embedded icon could not be read as an image");
+            return;
+        };
+        // SAFETY: the application object belongs to the main thread, which
+        // `MainThreadMarker` proves we are on, and the image outlives the
+        // call because AppKit retains it.
+        unsafe {
+            NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn set_dock_icon(&self) {}
+
     /// Builds the system menu bar, where the platform has one.
     #[cfg(target_os = "macos")]
     fn install_native_menus(&mut self) {
@@ -1783,6 +1813,21 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
 }
 
+/// The window icon, for the platforms that have one.
+///
+/// An icon that will not decode is not worth refusing to start over, so a
+/// failure here leaves the window with the system default.
+fn window_icon() -> Option<winit::window::Icon> {
+    let (rgba, size) = crate::icon::decoded()?;
+    match winit::window::Icon::from_rgba(rgba, size, size) {
+        Ok(icon) => Some(icon),
+        Err(e) => {
+            log::warn!("could not build the window icon: {e}");
+            None
+        }
+    }
+}
+
 /// What the Help menu's shortcut command puts in the status bar.
 const SHORTCUT_HINT: &str = "V select · H pan · C connect · ⌘Z undo · ⌘S save · \
 ⌘G group · ⌘1 fit · ⌘0 actual size · drag a page tab to reorder";
@@ -1801,16 +1846,18 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // The menu bar belongs to the application rather than to the window,
-        // so it is installed once the application exists and survives the
-        // window being recreated.
+        // Both of these belong to the application rather than to the window,
+        // so they are set once the application exists and survive the window
+        // being recreated.
         self.install_native_menus();
+        self.set_dock_icon();
 
         if matches!(self.surface, Surface::Live { .. }) {
             return;
         }
 
         let attributes = Window::default_attributes()
+            .with_window_icon(window_icon())
             .with_title("Untitled — DiagramCraft")
             .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(640.0, 480.0));

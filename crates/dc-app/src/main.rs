@@ -13,6 +13,7 @@ mod clipboard;
 mod editor;
 mod export;
 mod history;
+mod icon;
 mod menu;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -33,6 +34,7 @@ USAGE:
     diagramcraft [FILE.lucid | FILE.vsdx]
     diagramcraft export <IN.lucid> <OUT.png> [SCALE]
     diagramcraft import <IN.vsdx> <OUT.lucid>
+    diagramcraft icon <OUT.png> [SIZE]
     diagramcraft demo <OUT.lucid>
     diagramcraft preview <IN.lucid> <OUT.png> [--dark] [--editing]
                                               [--menu NAME] [--library NAME]
@@ -59,6 +61,7 @@ fn main() -> ExitCode {
         }
         Some("export") => run_export(&args[1..]),
         Some("import") => run_import(&args[1..]),
+        Some("icon") => run_icon(&args[1..]),
         Some("demo") => run_demo(&args[1..]),
         Some("preview") => run_preview(&args[1..]),
         _ => run_editor(args.first().map(PathBuf::from)),
@@ -143,6 +146,35 @@ fn run_import(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("diagramcraft: could not write {output}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Renders the application icon at a given size.
+fn run_icon(args: &[String]) -> ExitCode {
+    let Some(output) = args.first() else {
+        eprintln!("diagramcraft icon: expected <OUT.png> [SIZE]\n\n{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let size = match args.get(1) {
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(s) if s > 0 => s,
+            _ => {
+                eprintln!("diagramcraft icon: SIZE must be a positive number, got {raw:?}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => 1024,
+    };
+
+    match export::render_icon_png(size, Path::new(output)) {
+        Ok((w, h)) => {
+            println!("wrote {output} ({w}x{h})");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("diagramcraft: could not render the icon: {e}");
             ExitCode::FAILURE
         }
     }

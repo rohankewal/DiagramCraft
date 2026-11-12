@@ -214,6 +214,22 @@ pub fn render_editor_png(
     Ok((width, height))
 }
 
+/// Renders the application icon to a PNG at the given size.
+///
+/// The icon is drawn by the same renderer the canvas uses, so regenerating an
+/// icon set is a command rather than a trip through an image editor.
+pub fn render_icon_png(size: u32, path: impl AsRef<Path>) -> Result<(u32, u32), Error> {
+    let size = size.clamp(1, MAX_DIMENSION);
+    let mut scene = Scene::new();
+    crate::icon::draw(&mut scene, size as f64);
+
+    // Transparent outside the rounded square: an icon's corners must let the
+    // desktop through, not sit on a colour of their own.
+    let pixels = rasterize(&scene, size, size, dc_model::Color::TRANSPARENT)?;
+    write_png(path, size, size, &pixels)?;
+    Ok((size, size))
+}
+
 /// Runs a scene through Vello on a headless device and returns RGBA8 pixels.
 fn rasterize(
     scene: &Scene,
