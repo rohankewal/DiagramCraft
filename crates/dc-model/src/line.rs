@@ -158,6 +158,27 @@ impl Endpoint {
         Endpoint::ShapeEndpoint { style, shape_id: shape_id.into(), position: None }
     }
 
+    /// Attached to one fixed point on a shape rather than to whichever edge
+    /// happens to face the other end.
+    ///
+    /// The routing layer honours the position and infers only the direction,
+    /// so a pinned connector keeps its port as either shape moves.
+    pub fn at_shape_point(
+        shape_id: impl Into<String>,
+        style: EndpointStyle,
+        at: RelPoint,
+    ) -> Self {
+        Endpoint::ShapeEndpoint { style, shape_id: shape_id.into(), position: Some(at) }
+    }
+
+    /// The fixed attachment point, when this end is pinned to one.
+    pub fn pinned_at(&self) -> Option<RelPoint> {
+        match self {
+            Endpoint::ShapeEndpoint { position, .. } => *position,
+            _ => None,
+        }
+    }
+
     pub fn at_point(p: Point, style: EndpointStyle) -> Self {
         Endpoint::PositionEndpoint { style, position: p }
     }

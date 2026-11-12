@@ -23,8 +23,10 @@ use std::fs::File;
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 
+pub mod data;
 pub mod validate;
 
+pub use data::DataSource;
 pub use validate::{Severity, ValidationIssue};
 
 /// The entry name of the document, fixed by the format.
@@ -77,6 +79,23 @@ impl LucidPackage {
 
     pub fn validate(&self) -> Vec<ValidationIssue> {
         validate::validate(self)
+    }
+
+    /// The package's CSV data sources, in name order.
+    ///
+    /// A file that holds no header row is not a source and is skipped; it is
+    /// still carried in `data` and still written back out, since round-trip
+    /// fidelity does not depend on this build understanding a file.
+    pub fn data_sources(&self) -> Vec<DataSource> {
+        self.data
+            .iter()
+            .filter_map(|(name, bytes)| DataSource::parse(name, bytes))
+            .collect()
+    }
+
+    /// One data source by entry name.
+    pub fn data_source(&self, name: &str) -> Option<DataSource> {
+        DataSource::parse(name, self.data.get(name)?)
     }
 
     /// Reads a package from a path.

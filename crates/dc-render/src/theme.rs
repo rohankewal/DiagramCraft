@@ -147,6 +147,10 @@ pub struct Metrics {
     pub handle_size: f64,
     /// How close the pointer must be to a handle to grab it.
     pub handle_hit_slop: f64,
+    /// Radius of a connection point offered on a shape's edge.
+    pub port_radius: f64,
+    /// Radius of a quick-connect arrow sitting outside a shape's edge.
+    pub quick_connect_radius: f64,
     /// Distance at which a drag snaps to a guide.
     pub snap_threshold: f64,
     pub corner_radius: f64,
@@ -163,6 +167,10 @@ impl Default for Metrics {
             page_tabs_height: 32.0,
             handle_size: 8.0,
             handle_hit_slop: 4.0,
+            // Smaller than a selection handle: a port is a target to aim at,
+            // not something to grab and drag.
+            port_radius: 4.0,
+            quick_connect_radius: 5.0,
             snap_threshold: 6.0,
             corner_radius: 6.0,
         }

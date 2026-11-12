@@ -1421,6 +1421,10 @@ impl App {
                 }
             }
 
+            UiAction::LinkData { source, key_column } => {
+                self.editor.link_data(&source, &key_column);
+            }
+
             UiAction::SetPageSize(name) => {
                 self.editor.set_page_size(dc_model::PageSize {
                     size_type: name,

@@ -64,6 +64,12 @@ pub enum UiAction {
 
     // Insert
     InsertImage,
+    /// Matches shape labels against a column of a bundled CSV and copies the
+    /// matching row onto each shape as custom data.
+    LinkData {
+        source: String,
+        key_column: String,
+    },
     SelectLibrary(ShapeLibrary),
     /// Puts keystrokes into the palette's search field.
     FocusPaletteSearch,

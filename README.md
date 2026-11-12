@@ -36,6 +36,8 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - Full undo and redo, with each drag recorded as a single step
 - Cut, copy, and paste, including between two running copies
 - Multi-page documents: add, duplicate, rename, delete, and drag to reorder
+- Containers that carry their contents: drop a shape into a pool or swimlane
+  and it travels with the container, which grows to take in what overhangs
 
 **Text**
 - Edit labels in place: double-click a shape or connector, or press Enter
@@ -54,6 +56,11 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 **Connectors**
 - Straight, elbow, and curved routing
 - Smart attachment that picks the facing edge as shapes move
+- Fixed connection points: aim at a port to pin an end to one edge instead,
+  and it keeps that port as either shape moves or turns
+- Quick-connect: hover a shape and drag an arrow off its edge to draw a
+  connector — let go on empty canvas and the next shape is made, already
+  joined, so a flowchart is a run of drags rather than a trip to the palette
 - Orthogonal auto-routing that steers around other shapes
 - 22 endpoint styles: arrows, UML, BPMN, and ERD crow's-foot notation,
   set per end, with a command to reverse a connector
@@ -65,6 +72,8 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - `.lucid` read and write, lossless for fields this build does not interpret
 - `.vsdx` import: Visio pages, shapes, text, styling, and connectors
 - Bundled images decoded and drawn, clipped to any shape outline
+- CSV data linking: match shape labels against a column of a bundled data
+  source and the row's columns land in the shape's data panel
 - PNG export, headless and scriptable
 - Light and dark themes
 - Graph, line, and dot grids
@@ -99,6 +108,7 @@ diagramcraft drawing.vsdx                     # import a Visio drawing
 diagramcraft export in.lucid out.png 2        # render to PNG at 2x
 diagramcraft import in.vsdx out.lucid         # convert Visio, headlessly
 diagramcraft preview in.lucid shot.png        # screenshot the editor itself
+diagramcraft preview in.lucid shot.png --hover   # ...with the connect arrows out
 diagramcraft demo out.lucid                   # write the bundled sample
 ```
 
@@ -201,18 +211,27 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 923 tests
+cargo test --workspace     # 961 tests
 ```
 
 ## Scope
 
 Implemented: all eight published shape libraries, all three connector routings,
-the published endpoint styles, pages, groups, layers, per-selection text
-styling, the text markup subset, the full `.lucid` container, and `.vsdx`
-import.
+the published endpoint styles, pages, groups, layers, container membership,
+per-selection text styling, the text markup subset, the full `.lucid`
+container including its CSV data sources, and `.vsdx` import.
 
 Known limits:
 
+- **Container membership is geometric.** The format marks a container with
+  `magnetize` but publishes no field binding a child to one, so membership is
+  decided by where a shape sits: a shape counts as inside when its centre is
+  within the container. Nothing about the relationship is written to the file,
+  which is why it survives a round trip — there is nothing to survive.
+- **Data links are a one-time copy.** Matching a shape label against a column
+  writes that row into `customData`, which the format does publish. There is
+  no live binding back to the CSV, because the format defines none; re-running
+  the link after the data changes refreshes the values in place.
 - **Cloud icon artwork.** AWS, Azure, and GCP shapes carry a `className` naming
   an icon whose artwork the format does not ship. They import, draw as a tile
   with the vendor's mark and the shape's text, stay editable, and save with the

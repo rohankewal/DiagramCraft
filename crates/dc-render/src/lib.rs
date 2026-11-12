@@ -104,6 +104,12 @@ pub struct Overlay<'a> {
     pub snap_guides: &'a [SnapGuide],
     /// A connector mid-draw, from its origin to the pointer.
     pub pending_connector: Option<(Point, Point)>,
+    /// Connection points to offer on the shape being aimed at, in document
+    /// units. Empty whenever no connector is being drawn or aimed.
+    pub ports: &'a [Point],
+    /// Quick-connect arrows around the hovered shape, in document units.
+    /// Dragging one draws a connector and makes the shape it lands on.
+    pub quick_connect: &'a [Point],
     /// The item whose label is being edited.
     ///
     /// Its static text is suppressed so the live editing view is the only copy
@@ -798,6 +804,38 @@ impl Renderer {
                 px(self.theme.accent),
                 None,
                 &p,
+            );
+        }
+
+        // Quick-connect arrows: a filled chevron pointing away from the
+        // shape, so it reads as "drag out this way" rather than as another
+        // handle to grab.
+        for arrow in overlay.quick_connect {
+            let p = camera.doc_to_screen(*arrow);
+            let r = self.metrics.quick_connect_radius;
+            let dot = Circle::new((p.x, p.y), r);
+            scene.fill(FillRule::NonZero, ident, px(self.theme.accent), None, &dot);
+            scene.stroke(
+                &KStroke::new(1.0),
+                ident,
+                px(self.theme.handle_fill),
+                None,
+                &dot,
+            );
+        }
+
+        // Connection points, drawn after the pending connector so the port
+        // being aimed at reads as on top of the line rather than under it.
+        for port in overlay.ports {
+            let p = camera.doc_to_screen(*port);
+            let dot = Circle::new((p.x, p.y), self.metrics.port_radius);
+            scene.fill(FillRule::NonZero, ident, px(self.theme.handle_fill), None, &dot);
+            scene.stroke(
+                &KStroke::new(1.5),
+                ident,
+                px(self.theme.attach_highlight),
+                None,
+                &dot,
             );
         }
 

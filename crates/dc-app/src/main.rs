@@ -38,6 +38,7 @@ USAGE:
     diagramcraft demo <OUT.lucid>
     diagramcraft preview <IN.lucid> <OUT.png> [--dark] [--editing]
                                               [--menu NAME] [--library NAME]
+                                              [--hover] [--connect]
                                               [--settings] [--bold] [--line]
     diagramcraft --help
 ";
@@ -224,6 +225,21 @@ fn run_preview(args: &[String]) -> ExitCode {
     if args.iter().any(|a| a == "--line") {
         if let Some(id) = editor.page().lines().first().map(|l| l.id.clone()) {
             editor.selection = vec![id];
+        }
+    }
+
+    // `--hover` puts the pointer over the first shape, which is what brings
+    // the quick-connect arrows out. `--connect` arms the connector tool
+    // instead, which shows that shape's connection points.
+    let hover = args.iter().any(|a| a == "--hover");
+    let connect = args.iter().any(|a| a == "--connect");
+    if hover || connect {
+        if let Some(id) = editor.page().shapes().first().map(|s| s.id.clone()) {
+            if connect {
+                editor.tool = editor::Tool::Connector;
+            }
+            editor.hovered = Some(id);
+            editor.refresh_ports();
         }
     }
 

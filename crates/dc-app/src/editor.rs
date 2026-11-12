@@ -11,7 +11,7 @@ use crate::textedit::{EditTarget, TextCommand, TextCtx, TextEdit};
 use dc_lucid::LucidPackage;
 use dc_model::{
     BoundingBox, Color, Document, Endpoint, EndpointStyle, Fill, Line, LineType, Page, Point,
-    Shape, ShapeType, Stroke, Style, Text,
+    RelPoint, Shape, ShapeType, Stroke, Style, Text,
 };
 use dc_render::handles::{self, HandleKind};
 use dc_render::{Camera, Overlay, SnapGuide};
@@ -79,7 +79,12 @@ enum Drag {
     Connector {
         from_shape: Option<String>,
         from: Point,
+        /// The port this connector left from, when it started on one.
+        from_port: Option<RelPoint>,
         current: Point,
+        /// Whether letting go on empty canvas creates the shape to land on.
+        /// Set for quick-connect; the connector tool leaves a loose end.
+        create_on_empty: bool,
     },
     Create {
         shape_type: ShapeType,
@@ -244,6 +249,29 @@ impl SelectBy {
 const DRAG_THRESHOLD_PX: f64 = 3.0;
 /// How close a click must be to a connector to select it, in screen pixels.
 const LINE_PICK_SLOP_PX: f64 = 6.0;
+/// Space a container leaves around a shape it grows to absorb, in points.
+const CONTAINER_PADDING: f64 = 12.0;
+
+/// Where a connector may pin itself on a shape: the four edge midpoints,
+/// which is the set Lucidchart offers before a shape declares its own.
+///
+/// A connector that takes one of these keeps it as either shape moves,
+/// instead of sliding around to whichever edge happens to face the other end.
+const PORTS: [RelPoint; 4] = [
+    RelPoint::new(0.5, 0.0),
+    RelPoint::new(1.0, 0.5),
+    RelPoint::new(0.5, 1.0),
+    RelPoint::new(0.0, 0.5),
+];
+/// How near the pointer must come to a port to take it, in screen pixels.
+const PORT_GRAB_PX: f64 = 10.0;
+/// How far outside an edge a quick-connect arrow sits, in screen pixels.
+const QUICK_CONNECT_OFFSET_PX: f64 = 18.0;
+/// How near the pointer must come to a quick-connect arrow to take it.
+const QUICK_CONNECT_GRAB_PX: f64 = 9.0;
+/// How far a quick-connect drag must travel before it makes a shape, in
+/// document units. Shorter than this is a slip, not a request for one.
+const QUICK_CONNECT_MIN_DRAG: f64 = 20.0;
 
 pub struct Editor {
     pub package: LucidPackage,
@@ -253,6 +281,12 @@ pub struct Editor {
     pub tool: Tool,
     pub hovered: Option<String>,
     pub attach_target: Option<String>,
+    /// Connection points currently offered on screen, in document units.
+    pub ports: Vec<Point>,
+    /// Quick-connect arrows currently offered, in document units.
+    pub quick_connect: Vec<Point>,
+    /// Set while a gesture is recording itself as one undo step.
+    in_compound_change: bool,
     pub path: Option<PathBuf>,
     pub dirty: bool,
     /// Whether a drag aligns to the edges and centres of other shapes.
@@ -297,6 +331,9 @@ impl Editor {
             tool: Tool::default(),
             hovered: None,
             attach_target: None,
+            ports: Vec::new(),
+            quick_connect: Vec::new(),
+            in_compound_change: false,
             path: None,
             dirty: false,
             snap_enabled: true,
@@ -391,6 +428,8 @@ impl Editor {
             marquee,
             snap_guides: &self.guides,
             pending_connector,
+            ports: &self.ports,
+            quick_connect: &self.quick_connect,
             editing: self.editing_id(),
         }
     }
@@ -398,8 +437,31 @@ impl Editor {
     // ------------------------------------------------------------- lifecycle
 
     fn begin_change(&mut self) {
+        // Inside a compound gesture the outer call already took the snapshot,
+        // and a second one here would split the gesture across two undos.
+        if self.in_compound_change {
+            self.dirty = true;
+            return;
+        }
         self.history.record(&self.package.document);
         self.dirty = true;
+    }
+
+    /// Runs several commands as a single undo step.
+    ///
+    /// Quick-connect creates a shape and a connector; both are ordinary
+    /// commands that would each record history, but the person made one
+    /// gesture and expects one undo to take it back.
+    fn as_one_change<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let nested = self.in_compound_change;
+        if !nested {
+            self.history.record(&self.package.document);
+            self.dirty = true;
+            self.in_compound_change = true;
+        }
+        let result = body(self);
+        self.in_compound_change = nested;
+        result
     }
 
     pub fn undo(&mut self) {
@@ -752,21 +814,56 @@ impl Editor {
                 let from_shape = self.pick_at(doc_point).filter(|id| {
                     self.page().shape(id).is_some()
                 });
-                let from = match &from_shape {
-                    Some(id) => self
+                // Pressing on a port pins that end there; pressing anywhere
+                // else on the shape leaves the end free to find its own edge.
+                let from_port = from_shape
+                    .as_ref()
+                    .and_then(|id| self.port_at(id, doc_point));
+                let from = match (&from_shape, from_port) {
+                    (Some(id), Some(rel)) => self
+                        .page()
+                        .shape(id)
+                        .map(|s| s.bounding_box.point_at(rel))
+                        .unwrap_or(doc_point),
+                    (Some(id), None) => self
                         .page()
                         .shape(id)
                         .map(|s| s.bounding_box.center())
                         .unwrap_or(doc_point),
-                    None => doc_point,
+                    (None, _) => doc_point,
                 };
-                self.drag = Some(Drag::Connector { from_shape, from, current: doc_point });
+                self.drag = Some(Drag::Connector {
+                    from_shape,
+                    from,
+                    from_port,
+                    current: doc_point,
+                    create_on_empty: false,
+                });
             }
 
             Tool::Select => {
                 // Handles take priority over the shapes beneath them.
                 if let Some(handle) = self.handle_at(screen) {
                     self.start_handle_drag(handle, doc_point);
+                    return;
+                }
+
+                // Quick-connect arrows sit outside the hovered shape, so they
+                // are tested before whatever lies under them.
+                if let Some((id, rel)) = self.quick_connect_at(doc_point) {
+                    let from = self
+                        .page()
+                        .shape(&id)
+                        .map(|s| s.bounding_box.point_at(rel))
+                        .unwrap_or(doc_point);
+                    self.drag = Some(Drag::Connector {
+                        from_shape: Some(id),
+                        from,
+                        from_port: Some(rel),
+                        current: doc_point,
+                        create_on_empty: true,
+                    });
+                    self.refresh_ports();
                     return;
                 }
 
@@ -791,7 +888,7 @@ impl Editor {
 
                         // Only shapes move; a connector follows its endpoints.
                         if self.selection.iter().any(|s| self.page().shape(s).is_some()) {
-                            let originals = self.selected_shape_boxes();
+                            let originals = self.move_set_boxes();
                             self.drag = Some(Drag::Move { start: doc_point, originals });
                         }
                     }
@@ -869,6 +966,245 @@ impl Editor {
             .collect()
     }
 
+    /// The shapes a drag of the current selection carries with it.
+    ///
+    /// A container takes what sits inside it along, so dragging a pool or a
+    /// swimlane moves its contents rather than sliding out from under them.
+    /// Membership is geometric because the format records none: Lucid marks a
+    /// container with `magnetize` and infers the rest from where things sit.
+    fn move_set_boxes(&self) -> Vec<(String, BoundingBox)> {
+        let page = self.page();
+        let mut ids = self.selection.clone();
+
+        // Walks what it is appending to, so a container inside a container
+        // contributes its own contents too.
+        let mut next = 0;
+        while next < ids.len() {
+            let id = ids[next].clone();
+            next += 1;
+            match page.shape(&id) {
+                Some(s) if s.shape_type.is_container() && s.is_magnetized() => {}
+                _ => continue,
+            }
+            for member in self.contained_ids(&id) {
+                if !ids.contains(&member) {
+                    ids.push(member);
+                }
+            }
+        }
+
+        ids.iter()
+            .filter_map(|id| page.shape(id).map(|s| (id.clone(), s.bounding_box)))
+            .collect()
+    }
+
+    /// The shapes sitting inside a container.
+    ///
+    /// A shape counts as inside when its centre is within the container,
+    /// which forgives the overhang a stroke leaves and does not claim a
+    /// neighbour that merely abuts the edge.
+    fn contained_ids(&self, container_id: &str) -> Vec<String> {
+        let page = self.page();
+        let Some(container) = page.shape(container_id) else {
+            return Vec::new();
+        };
+        let bounds = container.bounding_box.aabb();
+        page.shapes()
+            .iter()
+            .filter(|s| s.id != container_id)
+            .filter(|s| bounds.contains(s.bounding_box.center()))
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// A shape's connection points, in document coordinates.
+    ///
+    /// Rotation is carried by `point_at`, so the ports of a turned shape sit
+    /// on its turned edges rather than on its upright bounding box.
+    pub fn ports_of(&self, shape_id: &str) -> Vec<(RelPoint, Point)> {
+        let Some(shape) = self.page().shape(shape_id) else {
+            return Vec::new();
+        };
+        PORTS
+            .iter()
+            .map(|rel| (*rel, shape.bounding_box.point_at(*rel)))
+            .collect()
+    }
+
+    /// The port of a shape the pointer is close enough to take, if any.
+    ///
+    /// Returning `None` is the ordinary case and means smart attachment: the
+    /// connector picks a facing edge and keeps picking as the shapes move.
+    fn port_at(&self, shape_id: &str, doc_point: Point) -> Option<RelPoint> {
+        let slop = self.camera.screen_to_doc_scalar(PORT_GRAB_PX);
+        self.ports_of(shape_id)
+            .into_iter()
+            .map(|(rel, at)| (rel, at.distance_to(doc_point)))
+            .filter(|(_, distance)| *distance <= slop)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(rel, _)| rel)
+    }
+
+    /// The shape quick-connect is offering itself on.
+    ///
+    /// Only while the select tool is idle over a shape: during a drag or a
+    /// text edit the arrows would be in the way of what is actually going on.
+    fn quick_connect_shape(&self) -> Option<String> {
+        if self.tool != Tool::Select || self.drag.is_some() || self.is_editing() {
+            return None;
+        }
+        let id = self.hovered.clone()?;
+        self.page().shape(&id).is_some().then_some(id)
+    }
+
+    /// The quick-connect arrows around the hovered shape, with the port each
+    /// one draws from.
+    ///
+    /// Each arrow sits directly outward from its edge midpoint, so on a
+    /// rotated shape it stays with the edge it belongs to.
+    pub fn quick_connect_points(&self) -> Vec<(RelPoint, Point)> {
+        let Some(id) = self.quick_connect_shape() else {
+            return Vec::new();
+        };
+        let Some(shape) = self.page().shape(&id) else {
+            return Vec::new();
+        };
+        let reach = self.camera.screen_to_doc_scalar(QUICK_CONNECT_OFFSET_PX);
+        let bounds = shape.bounding_box;
+        let centre = bounds.center();
+        PORTS
+            .iter()
+            .map(|rel| {
+                let at = bounds.point_at(*rel);
+                let (dx, dy) = (at.x - centre.x, at.y - centre.y);
+                let len = (dx * dx + dy * dy).sqrt().max(f64::EPSILON);
+                (*rel, Point::new(at.x + dx / len * reach, at.y + dy / len * reach))
+            })
+            .collect()
+    }
+
+    /// The quick-connect arrow under the pointer, as the shape it belongs to
+    /// and the port it draws from.
+    fn quick_connect_at(&self, doc_point: Point) -> Option<(String, RelPoint)> {
+        let id = self.quick_connect_shape()?;
+        let slop = self.camera.screen_to_doc_scalar(QUICK_CONNECT_GRAB_PX);
+        self.quick_connect_points()
+            .into_iter()
+            .map(|(rel, at)| (rel, at.distance_to(doc_point)))
+            .filter(|(_, distance)| *distance <= slop)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(rel, _)| (id, rel))
+    }
+
+    /// The shape a quick-connect drag creates when it lands on empty canvas.
+    ///
+    /// It takes the type of the shape it came from, which is what makes
+    /// building a flowchart a run of drags rather than a trip to the palette
+    /// between each step.
+    fn create_quick_connect_target(&mut self, from_shape: &str, at: Point) -> Option<String> {
+        let shape_type = self.page().shape(from_shape)?.shape_type.clone();
+        let (w, h) = shape_type.default_size();
+        Some(self.create_shape(
+            shape_type,
+            BoundingBox::new(at.x - w / 2.0, at.y - h / 2.0, w, h),
+        ))
+    }
+
+    /// Recomputes which connection points are on screen.
+    ///
+    /// Ports show on the shape under the pointer while a connector is being
+    /// drawn or the connector tool is armed — the moments they are the thing
+    /// being aimed at — and stay out of the way the rest of the time. They
+    /// live on the editor rather than being derived in `overlay()` because
+    /// the overlay borrows them, exactly as it borrows the snap guides.
+    ///
+    /// Public so a headless preview can set a hover and have the affordances
+    /// appear, the same way `--editing` opens a label without a window.
+    pub fn refresh_ports(&mut self) {
+        let target = match &self.drag {
+            Some(Drag::Connector { .. }) => {
+                self.attach_target.clone().or_else(|| self.hovered.clone())
+            }
+            None if self.tool == Tool::Connector => self.hovered.clone(),
+            _ => None,
+        };
+        self.ports = match target {
+            Some(id) if self.page().shape(&id).is_some() => {
+                self.ports_of(&id).into_iter().map(|(_, at)| at).collect()
+            }
+            _ => Vec::new(),
+        };
+        self.quick_connect = self
+            .quick_connect_points()
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect();
+    }
+
+    /// The topmost magnetized container under a point, ignoring the shapes
+    /// currently being dragged — a container cannot be dropped into itself.
+    fn container_at(&self, p: Point, excluding: &[String]) -> Option<String> {
+        self.page()
+            .shapes()
+            .iter()
+            .rev()
+            .find(|s| {
+                s.shape_type.is_container()
+                    && s.is_magnetized()
+                    && !excluding.iter().any(|id| id == &s.id)
+                    && s.bounding_box.aabb().contains(p)
+            })
+            .map(|s| s.id.clone())
+    }
+
+    /// Grows a container to cover what was just dropped into it.
+    ///
+    /// Without this a shape dragged onto the edge of a pool would hang over
+    /// the side. Containers magnetize, so the container gives way rather than
+    /// the shape snapping back.
+    ///
+    /// This runs inside the drag's existing undo step, so growing the
+    /// container and moving the shape undo together as the one gesture they
+    /// were.
+    fn absorb_into_container(&mut self, moved: &[String], drop_point: Point) {
+        let Some(container_id) = self.container_at(drop_point, moved) else {
+            return;
+        };
+
+        let page = self.page();
+        let Some(container) = page.shape(&container_id) else {
+            return;
+        };
+        let current = container.bounding_box;
+        let mut needed = current.aabb();
+        let mut absorbed = 0;
+        for id in moved {
+            if let Some(shape) = page.shape(id) {
+                // Padded so an absorbed shape does not end up flush against
+                // the container's own edge.
+                needed = needed.union(&shape.bounding_box.aabb().inflated(CONTAINER_PADDING));
+                absorbed += 1;
+            }
+        }
+        if absorbed == 0 {
+            return;
+        }
+
+        // A shape that already fits leaves the container alone.
+        if needed.w > current.w || needed.h > current.h {
+            if let Some(shape) = self.page_mut().shape_mut(&container_id) {
+                shape.bounding_box = needed.with_rotation(current.rotation_degrees());
+            }
+            self.dirty = true;
+        }
+
+        self.status = if absorbed == 1 {
+            "Added to container".into()
+        } else {
+            format!("Added {absorbed} shapes to container")
+        };
+    }
+
     pub fn pointer_move(&mut self, screen: Point, mods: Mods, cx: &mut TextCtx<'_>) {
         let doc_point = self.camera.screen_to_doc(screen);
 
@@ -881,6 +1217,7 @@ impl Editor {
 
         if self.drag.is_none() {
             self.hovered = self.pick_at(doc_point);
+            self.refresh_ports();
             return;
         }
 
@@ -914,16 +1251,27 @@ impl Editor {
                 self.drag = Some(Drag::Freehand { points });
             }
 
-            Some(Drag::Connector { from_shape, from, .. }) => {
+            Some(Drag::Connector { from_shape, from, from_port, create_on_empty, .. }) => {
                 self.attach_target = self
                     .pick_at(doc_point)
                     .filter(|id| self.page().shape(id).is_some())
                     .filter(|id| Some(id) != from_shape.as_ref());
-                self.drag = Some(Drag::Connector { from_shape, from, current: doc_point });
+                self.drag = Some(Drag::Connector {
+                    from_shape,
+                    from,
+                    from_port,
+                    current: doc_point,
+                    create_on_empty,
+                });
+                self.refresh_ports();
             }
 
             Some(Drag::Move { start, originals }) => {
                 self.apply_move(start, &originals, doc_point, mods);
+                // Lights up the container the drop would land in, reusing the
+                // same highlight a connector uses for its attach target.
+                let moving: Vec<String> = originals.iter().map(|(id, _)| id.clone()).collect();
+                self.attach_target = self.container_at(doc_point, &moving);
                 self.drag = Some(Drag::Move { start, originals });
             }
 
@@ -1085,9 +1433,15 @@ impl Editor {
         let drag = self.drag.take();
         self.guides.clear();
         self.attach_target = None;
+        self.ports.clear();
+        self.quick_connect.clear();
         let was_click = self
             .press_screen
             .is_some_and(|p| p.distance_to(screen) < DRAG_THRESHOLD_PX);
+        // Where the pointer went down, which is what a quick-connect drag is
+        // measured against: its origin is the edge port, already some way
+        // from the arrow that was actually pressed.
+        let press_doc = self.press_screen.map(|p| self.camera.screen_to_doc(p));
         self.press_screen = None;
 
         if matches!(drag, Some(Drag::TextSelect)) {
@@ -1143,12 +1497,53 @@ impl Editor {
                 }
             }
 
-            Some(Drag::Connector { from_shape, from, .. }) => {
+            Some(Drag::Connector { from_shape, from, from_port, create_on_empty, .. }) => {
                 let to_shape = self
                     .pick_at(doc_point)
                     .filter(|id| self.page().shape(id).is_some())
                     .filter(|id| Some(id) != from_shape.as_ref());
-                self.create_connector(from_shape, from, to_shape, doc_point);
+                let to_port = to_shape.as_ref().and_then(|id| self.port_at(id, doc_point));
+
+                if create_on_empty && to_shape.is_none() {
+                    // Quick-connect that landed on empty canvas. Short of the
+                    // minimum travel it is a slip on the arrow rather than a
+                    // request, and makes nothing at all — not even the loose
+                    // connector the connector tool would leave.
+                    let travelled = press_doc
+                        .is_some_and(|p| p.distance_to(doc_point) >= QUICK_CONNECT_MIN_DRAG);
+                    let Some(source) = from_shape.clone() else {
+                        return;
+                    };
+                    if travelled {
+                        self.as_one_change(|e| {
+                            let created = e.create_quick_connect_target(&source, doc_point);
+                            e.create_connector(
+                                from_shape,
+                                from,
+                                from_port,
+                                created.clone(),
+                                doc_point,
+                                None,
+                            );
+                            if let Some(id) = created {
+                                // Leaves the new shape selected, ready to be
+                                // typed into or dragged on from again.
+                                e.selection = vec![id];
+                            }
+                        });
+                    }
+                } else {
+                    self.create_connector(
+                        from_shape, from, from_port, to_shape, doc_point, to_port,
+                    );
+                }
+            }
+
+            // A shape dropped inside a container is taken in by it. A click
+            // that never moved is not a drop, so it absorbs nothing.
+            Some(Drag::Move { originals, .. }) if !was_click => {
+                let moved: Vec<String> = originals.into_iter().map(|(id, _)| id).collect();
+                self.absorb_into_container(&moved, doc_point);
             }
 
             _ => {}
@@ -1439,12 +1834,15 @@ impl Editor {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_connector(
         &mut self,
         from_shape: Option<String>,
         from: Point,
+        from_port: Option<RelPoint>,
         to_shape: Option<String>,
         to: Point,
+        to_port: Option<RelPoint>,
     ) {
         // A connector anchored to nothing at both ends is almost always an
         // accidental drag on empty canvas.
@@ -1456,13 +1854,15 @@ impl Editor {
         }
 
         let id = self.package.document.fresh_id("line");
-        let start = match from_shape {
-            Some(s) => Endpoint::at_shape(s, EndpointStyle::None),
-            None => Endpoint::at_point(from, EndpointStyle::None),
+        let start = match (from_shape, from_port) {
+            (Some(s), Some(rel)) => Endpoint::at_shape_point(s, EndpointStyle::None, rel),
+            (Some(s), None) => Endpoint::at_shape(s, EndpointStyle::None),
+            (None, _) => Endpoint::at_point(from, EndpointStyle::None),
         };
-        let end = match to_shape {
-            Some(s) => Endpoint::at_shape(s, EndpointStyle::Arrow),
-            None => Endpoint::at_point(to, EndpointStyle::Arrow),
+        let end = match (to_shape, to_port) {
+            (Some(s), Some(rel)) => Endpoint::at_shape_point(s, EndpointStyle::Arrow, rel),
+            (Some(s), None) => Endpoint::at_shape(s, EndpointStyle::Arrow),
+            (None, _) => Endpoint::at_point(to, EndpointStyle::Arrow),
         };
 
         let routing = self.default_line_type;
@@ -2384,6 +2784,101 @@ impl Editor {
                 mutate(entry);
             }
         }
+    }
+
+    // ----------------------------------------------------------- data links
+
+    /// The CSV data sources this document carries.
+    pub fn data_sources(&self) -> Vec<dc_lucid::DataSource> {
+        self.package.data_sources()
+    }
+
+    /// Links shapes to a CSV source, matching each shape's label against a
+    /// column and copying that row's columns onto the shape as custom data.
+    ///
+    /// The format publishes the data directory but no binding between a row
+    /// and a shape, so the link is made of published parts: the match is on
+    /// text the document already holds, and the result is written to
+    /// `customData`, which round-trips like any other field. There is no
+    /// hidden state, which also means a re-link is simply this run again.
+    ///
+    /// Columns already present on a shape are updated in place rather than
+    /// duplicated, so re-linking after the CSV changes refreshes the values
+    /// and leaves hand-entered fields alone.
+    ///
+    /// Acts on the selection when there is one and on the whole page
+    /// otherwise. Returns how many shapes matched a row.
+    pub fn link_data(&mut self, source_name: &str, key_column: &str) -> usize {
+        let Some(source) = self.package.data_source(source_name) else {
+            self.status = format!("No data source named {source_name}");
+            return 0;
+        };
+        let Some(key_index) = source.column(key_column) else {
+            self.status = format!("{source_name} has no column named {key_column}");
+            return 0;
+        };
+
+        let targets: Vec<String> = if self.selection.is_empty() {
+            self.page().shapes().iter().map(|s| s.id.clone()).collect()
+        } else {
+            self.selection
+                .iter()
+                .filter(|id| self.page().shape(id).is_some())
+                .cloned()
+                .collect()
+        };
+
+        // Resolves every row first so the document is touched only if some
+        // shape actually matched, which keeps a miss off the undo stack.
+        let mut matches: Vec<(String, Vec<dc_model::CustomDataEntry>)> = Vec::new();
+        for id in &targets {
+            let Some(shape) = self.page().shape(id) else {
+                continue;
+            };
+            let label = shape.text_str().trim().to_string();
+            if label.is_empty() {
+                continue;
+            }
+            let Some(row) = source.row_matching(key_index, &label) else {
+                continue;
+            };
+            let entries = source
+                .headers
+                .iter()
+                .zip(row.iter())
+                .map(|(key, value)| dc_model::CustomDataEntry {
+                    key: key.trim().to_string(),
+                    value: value.trim().to_string(),
+                })
+                .collect();
+            matches.push((id.clone(), entries));
+        }
+
+        if matches.is_empty() {
+            self.status = format!("No shape label matched a {key_column} in {source_name}");
+            return 0;
+        }
+
+        let linked = matches.len();
+        self.begin_change();
+        for (id, entries) in matches {
+            let Some(shape) = self.page_mut().shape_mut(&id) else {
+                continue;
+            };
+            let existing = shape.custom_data.get_or_insert_with(Vec::new);
+            for entry in entries {
+                match existing.iter_mut().find(|e| e.key == entry.key) {
+                    Some(found) => found.value = entry.value,
+                    None => existing.push(entry),
+                }
+            }
+        }
+
+        self.status = format!(
+            "Linked {linked} of {} shapes to {source_name}",
+            targets.len()
+        );
+        linked
     }
 
     // -------------------------------------------------------------- layers
@@ -3535,6 +4030,497 @@ mod tests {
 
         let bb = e.page().shape(&moving).unwrap().bounding_box;
         assert_eq!(bb.x, 103.0, "snapping should have been bypassed");
+    }
+
+    /// An editor holding a two-column CSV and two labelled shapes, one of
+    /// which matches a row in it.
+    fn editor_with_data() -> (Editor, String, String) {
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        e.package.data.insert(
+            "records.csv".into(),
+            b"id,owner,status\nalpha,ops,live\nbeta,sales,draft\n".to_vec(),
+        );
+        let matching = e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 80.0, 40.0));
+        let other = e.create_shape(ShapeType::Rectangle, BoundingBox::new(200.0, 0.0, 80.0, 40.0));
+        e.set_selection_text_for_test(&matching, "alpha");
+        e.set_selection_text_for_test(&other, "nothing like it");
+        e.selection.clear();
+        e.dirty = false;
+        e.history.clear();
+        (e, matching, other)
+    }
+
+    fn data_of(e: &Editor, id: &str) -> Vec<(String, String)> {
+        e.page()
+            .shape(id)
+            .and_then(|s| s.custom_data.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect()
+    }
+
+    #[test]
+    fn a_data_source_is_read_from_the_package() {
+        let (e, _, _) = editor_with_data();
+        let sources = e.data_sources();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].headers, vec!["id", "owner", "status"]);
+    }
+
+    #[test]
+    fn linking_copies_the_matching_row_onto_the_shape() {
+        let (mut e, matching, other) = editor_with_data();
+        assert_eq!(e.link_data("records.csv", "id"), 1);
+
+        assert_eq!(
+            data_of(&e, &matching),
+            vec![
+                ("id".to_string(), "alpha".to_string()),
+                ("owner".to_string(), "ops".to_string()),
+                ("status".to_string(), "live".to_string()),
+            ]
+        );
+        assert!(
+            data_of(&e, &other).is_empty(),
+            "a shape whose label matches nothing is left alone"
+        );
+    }
+
+    #[test]
+    fn relinking_updates_values_rather_than_duplicating_them() {
+        let (mut e, matching, _) = editor_with_data();
+        e.link_data("records.csv", "id");
+
+        // The source changes, and the link is run again.
+        e.package.data.insert(
+            "records.csv".into(),
+            b"id,owner,status\nalpha,platform,retired\n".to_vec(),
+        );
+        assert_eq!(e.link_data("records.csv", "id"), 1);
+
+        assert_eq!(
+            data_of(&e, &matching),
+            vec![
+                ("id".to_string(), "alpha".to_string()),
+                ("owner".to_string(), "platform".to_string()),
+                ("status".to_string(), "retired".to_string()),
+            ],
+            "the same three keys, with fresh values"
+        );
+    }
+
+    #[test]
+    fn linking_leaves_hand_entered_fields_in_place() {
+        let (mut e, matching, _) = editor_with_data();
+        if let Some(shape) = e.page_mut().shape_mut(&matching) {
+            shape.custom_data = Some(vec![dc_model::CustomDataEntry {
+                key: "note".into(),
+                value: "by hand".into(),
+            }]);
+        }
+
+        e.link_data("records.csv", "id");
+        let data = data_of(&e, &matching);
+        assert!(
+            data.contains(&("note".to_string(), "by hand".to_string())),
+            "the hand-entered field should survive, got {data:?}"
+        );
+        assert!(data.contains(&("owner".to_string(), "ops".to_string())));
+    }
+
+    #[test]
+    fn linking_honours_the_selection_when_there_is_one() {
+        let (mut e, matching, other) = editor_with_data();
+        // Only the shape that matches nothing is selected.
+        e.selection = vec![other];
+        assert_eq!(e.link_data("records.csv", "id"), 0);
+        assert!(
+            data_of(&e, &matching).is_empty(),
+            "a shape outside the selection is not linked"
+        );
+    }
+
+    #[test]
+    fn an_unknown_source_or_column_changes_nothing() {
+        let (mut e, matching, _) = editor_with_data();
+
+        assert_eq!(e.link_data("absent.csv", "id"), 0);
+        assert!(e.status.contains("absent.csv"));
+
+        assert_eq!(e.link_data("records.csv", "nosuchcolumn"), 0);
+        assert!(e.status.contains("nosuchcolumn"));
+
+        assert!(data_of(&e, &matching).is_empty());
+        assert!(!e.dirty, "a link that matched nothing is not a change");
+    }
+
+    #[test]
+    fn a_link_is_one_undo_step() {
+        let (mut e, matching, _) = editor_with_data();
+        e.link_data("records.csv", "id");
+        assert!(!data_of(&e, &matching).is_empty());
+
+        e.undo();
+        assert!(
+            data_of(&e, &matching).is_empty(),
+            "undo should take the whole link back"
+        );
+    }
+
+    /// Hovers the first shape so its quick-connect arrows are live, and
+    /// returns the editor with that shape's id.
+    ///
+    /// The shape is at (100,100) 100×60, so the right-hand arrow sits 18
+    /// document units out from its right edge midpoint, at (218,130).
+    fn editor_hovering_first_shape() -> (Editor, TestCx, String) {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        e.snap_enabled = false;
+        e.snap_to_grid = false;
+        let id = e.page().shapes()[0].id.clone();
+        e.pointer_move(Point::new(150.0, 130.0), mods(), &mut tcx.ctx());
+        (e, tcx, id)
+    }
+
+    #[test]
+    fn quick_connect_arrows_appear_outside_the_hovered_shape() {
+        let (e, _tcx, _id) = editor_hovering_first_shape();
+        assert_eq!(e.quick_connect.len(), 4);
+        assert!(
+            e.quick_connect.contains(&Point::new(218.0, 130.0)),
+            "the right-hand arrow should sit outside the right edge, got {:?}",
+            e.quick_connect
+        );
+    }
+
+    #[test]
+    fn quick_connect_arrows_are_select_tool_only() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        e.tool = Tool::Connector;
+        e.pointer_move(Point::new(150.0, 130.0), mods(), &mut tcx.ctx());
+        assert!(
+            e.quick_connect.is_empty(),
+            "the connector tool draws its own lines and needs no arrows"
+        );
+    }
+
+    #[test]
+    fn dragging_a_quick_connect_arrow_onto_empty_canvas_makes_a_shape() {
+        let (mut e, mut tcx, from) = editor_hovering_first_shape();
+
+        e.pointer_down(Point::new(218.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(400.0, 300.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(400.0, 300.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(e.page().shapes().len(), 3, "a third shape should exist");
+        let made = e.page().shapes()[2].clone();
+        assert_eq!(made.shape_type, ShapeType::Rectangle, "it takes the source's type");
+        let centre = made.bounding_box.center();
+        assert!(
+            (centre.x - 400.0).abs() < 0.01 && (centre.y - 300.0).abs() < 0.01,
+            "it should be centred where the pointer let go, was {centre:?}"
+        );
+
+        assert_eq!(e.page().lines().len(), 1, "and be joined to the source");
+        let line = &e.page().lines()[0];
+        assert_eq!(line.endpoint1.shape_id(), Some(from.as_str()));
+        assert_eq!(
+            line.endpoint1.pinned_at(),
+            Some(RelPoint::new(1.0, 0.5)),
+            "the connector keeps the port it was dragged from"
+        );
+        assert_eq!(line.endpoint2.shape_id(), Some(made.id.as_str()));
+        assert_eq!(e.selection, vec![made.id], "the new shape is left selected");
+    }
+
+    #[test]
+    fn a_quick_connect_gesture_is_one_undo_step() {
+        let (mut e, mut tcx, _from) = editor_hovering_first_shape();
+
+        e.pointer_down(Point::new(218.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(400.0, 300.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(400.0, 300.0), mods(), &mut tcx.ctx());
+        assert_eq!(e.page().shapes().len(), 3);
+        assert_eq!(e.page().lines().len(), 1);
+
+        // Creating the shape and the connector were two commands but one
+        // gesture, so one undo takes back both.
+        e.undo();
+        assert_eq!(e.page().shapes().len(), 2, "the shape should be gone");
+        assert_eq!(e.page().lines().len(), 0, "and so should the connector");
+    }
+
+    #[test]
+    fn dragging_a_quick_connect_arrow_onto_a_shape_only_connects() {
+        let (mut e, mut tcx, from) = editor_hovering_first_shape();
+        let target = e.page().shapes()[1].id.clone();
+
+        // Lands on the second shape rather than on empty canvas.
+        e.pointer_down(Point::new(218.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(450.0, 130.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(450.0, 130.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(e.page().shapes().len(), 2, "nothing new should be created");
+        let line = &e.page().lines()[0];
+        assert_eq!(line.endpoint1.shape_id(), Some(from.as_str()));
+        assert_eq!(line.endpoint2.shape_id(), Some(target.as_str()));
+    }
+
+    #[test]
+    fn a_slip_on_a_quick_connect_arrow_creates_nothing() {
+        let (mut e, mut tcx, _from) = editor_hovering_first_shape();
+
+        // Barely moves: under the minimum drag, so it is not a request.
+        e.pointer_down(Point::new(218.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(222.0, 133.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(222.0, 133.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(e.page().shapes().len(), 2, "no orphan shape");
+        assert_eq!(e.page().lines().len(), 0, "and no stray connector");
+    }
+
+    #[test]
+    fn a_connector_drawn_between_ports_pins_both_ends() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        let from = e.page().shapes()[0].id.clone();
+        let to = e.page().shapes()[1].id.clone();
+        e.tool = Tool::Connector;
+
+        // Top-centre of the first shape to left-centre of the second.
+        e.pointer_down(Point::new(150.0, 100.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(400.0, 130.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(400.0, 130.0), mods(), &mut tcx.ctx());
+
+        let line = &e.page().lines()[0];
+        assert_eq!(line.endpoint1.shape_id(), Some(from.as_str()));
+        assert_eq!(line.endpoint2.shape_id(), Some(to.as_str()));
+        assert_eq!(line.endpoint1.pinned_at(), Some(RelPoint::new(0.5, 0.0)));
+        assert_eq!(line.endpoint2.pinned_at(), Some(RelPoint::new(0.0, 0.5)));
+    }
+
+    #[test]
+    fn a_connector_drawn_from_the_middle_stays_smart() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        e.tool = Tool::Connector;
+
+        // Centre to centre, well clear of every port.
+        e.pointer_down(Point::new(150.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(450.0, 130.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(450.0, 130.0), mods(), &mut tcx.ctx());
+
+        let line = &e.page().lines()[0];
+        assert_eq!(
+            line.endpoint1.pinned_at(),
+            None,
+            "an end away from a port keeps picking its own edge"
+        );
+        assert_eq!(line.endpoint2.pinned_at(), None);
+    }
+
+    #[test]
+    fn ports_show_only_while_a_connector_is_being_aimed() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+
+        e.tool = Tool::Select;
+        e.pointer_move(Point::new(150.0, 130.0), mods(), &mut tcx.ctx());
+        assert!(e.ports.is_empty(), "the select tool offers no ports");
+
+        e.tool = Tool::Connector;
+        e.pointer_move(Point::new(150.0, 130.0), mods(), &mut tcx.ctx());
+        assert_eq!(e.ports.len(), 4, "the connector tool offers four");
+
+        e.pointer_move(Point::new(700.0, 500.0), mods(), &mut tcx.ctx());
+        assert!(e.ports.is_empty(), "and none over empty canvas");
+    }
+
+    #[test]
+    fn ports_follow_a_rotated_shape() {
+        let mut e = editor_with_two_shapes();
+        let id = e.page().shapes()[0].id.clone();
+
+        let upright = e.ports_of(&id);
+        assert_eq!(upright[0].1, Point::new(150.0, 100.0), "top-centre when upright");
+
+        if let Some(shape) = e.page_mut().shape_mut(&id) {
+            shape.bounding_box = shape.bounding_box.with_rotation(90.0);
+        }
+
+        // A quarter turn about the centre (150,130) puts the top port on the
+        // right-hand side.
+        let turned = e.ports_of(&id)[0].1;
+        assert!(
+            (turned.x - 180.0).abs() < 0.01 && (turned.y - 130.0).abs() < 0.01,
+            "the top port should turn with the shape, was {turned:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_end_keeps_its_port_when_the_shape_moves() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        let from = e.page().shapes()[0].id.clone();
+        e.tool = Tool::Connector;
+        e.pointer_down(Point::new(150.0, 100.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(400.0, 130.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(400.0, 130.0), mods(), &mut tcx.ctx());
+
+        // Moving the shape must not knock the connector off its port.
+        if let Some(shape) = e.page_mut().shape_mut(&from) {
+            shape.bounding_box = shape.bounding_box.translated(0.0, 200.0);
+        }
+        assert_eq!(
+            e.page().lines()[0].endpoint1.pinned_at(),
+            Some(RelPoint::new(0.5, 0.0)),
+            "the pin is relative, so it survives the move"
+        );
+    }
+
+    /// A container at (100,100) 300×200 with one 60×40 shape sitting inside
+    /// it, centred at (180,170). Returns the editor, container id, child id.
+    fn editor_with_a_container() -> (Editor, String, String) {
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        let container = e.create_shape(
+            ShapeType::RectangleContainer,
+            BoundingBox::new(100.0, 100.0, 300.0, 200.0),
+        );
+        let child =
+            e.create_shape(ShapeType::Rectangle, BoundingBox::new(150.0, 150.0, 60.0, 40.0));
+        e.selection.clear();
+        e.snap_enabled = false;
+        e.snap_to_grid = false;
+        e.dirty = false;
+        e.history.clear();
+        (e, container, child)
+    }
+
+    #[test]
+    fn dragging_a_container_carries_what_is_inside_it() {
+        let mut tcx = TestCx::new();
+        let (mut e, container, child) = editor_with_a_container();
+
+        // Presses a part of the container no child covers.
+        e.pointer_down(Point::new(350.0, 250.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(450.0, 300.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(450.0, 300.0), mods(), &mut tcx.ctx());
+
+        let moved = e.page().shape(&container).unwrap().bounding_box;
+        assert_eq!((moved.x, moved.y), (200.0, 150.0), "the container should move");
+
+        let carried = e.page().shape(&child).unwrap().bounding_box;
+        assert_eq!(
+            (carried.x, carried.y),
+            (250.0, 200.0),
+            "the shape inside should travel with the container"
+        );
+    }
+
+    #[test]
+    fn dragging_a_plain_shape_leaves_its_neighbours_alone() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        e.snap_enabled = false;
+        e.snap_to_grid = false;
+        let other = e.page().shapes()[1].id.clone();
+        let before = e.page().shape(&other).unwrap().bounding_box;
+
+        e.pointer_down(Point::new(150.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(200.0, 130.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(200.0, 130.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(
+            e.page().shape(&other).unwrap().bounding_box,
+            before,
+            "a rectangle is not a container and carries nothing"
+        );
+    }
+
+    #[test]
+    fn membership_is_decided_by_the_centre() {
+        let (mut e, container, _child) = editor_with_a_container();
+        // Straddles the right edge: centre at 420 is outside x 100..400.
+        let straddling =
+            e.create_shape(ShapeType::Rectangle, BoundingBox::new(390.0, 150.0, 60.0, 40.0));
+
+        let inside = e.contained_ids(&container);
+        assert!(!inside.contains(&straddling), "a shape centred outside is not a member");
+        assert_eq!(inside.len(), 1, "only the shape centred inside counts");
+    }
+
+    #[test]
+    fn a_shape_dropped_over_the_edge_grows_the_container() {
+        let mut tcx = TestCx::new();
+        let (mut e, container, _child) = editor_with_a_container();
+        // Starts clear of the container, to the right of it.
+        let dropped =
+            e.create_shape(ShapeType::Rectangle, BoundingBox::new(500.0, 150.0, 60.0, 40.0));
+        e.selection.clear();
+
+        // Drags it left so its centre lands inside but its body overhangs.
+        e.pointer_down(Point::new(530.0, 170.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(380.0, 170.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(380.0, 170.0), mods(), &mut tcx.ctx());
+
+        let shape = e.page().shape(&dropped).unwrap().bounding_box;
+        assert_eq!(shape.x, 350.0, "the shape itself should not be pushed back");
+
+        // Padded union of the container with the overhanging shape.
+        let grown = e.page().shape(&container).unwrap().bounding_box;
+        assert_eq!(grown.x, 100.0, "the container should not move its origin");
+        assert_eq!(grown.w, 322.0, "the container should reach past the shape plus padding");
+    }
+
+    #[test]
+    fn a_shape_that_already_fits_leaves_the_container_alone() {
+        let mut tcx = TestCx::new();
+        let (mut e, container, _child) = editor_with_a_container();
+        let before = e.page().shape(&container).unwrap().bounding_box;
+
+        // Moves the child around well inside the container.
+        e.pointer_down(Point::new(180.0, 170.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(280.0, 220.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(280.0, 220.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(
+            e.page().shape(&container).unwrap().bounding_box,
+            before,
+            "nothing overhangs, so the container keeps its size"
+        );
+    }
+
+    #[test]
+    fn absorbing_undoes_with_the_drag_that_caused_it() {
+        let mut tcx = TestCx::new();
+        let (mut e, container, _child) = editor_with_a_container();
+        let before = e.page().shape(&container).unwrap().bounding_box;
+        let dropped =
+            e.create_shape(ShapeType::Rectangle, BoundingBox::new(500.0, 150.0, 60.0, 40.0));
+        e.selection.clear();
+        e.history.clear();
+
+        e.pointer_down(Point::new(530.0, 170.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(380.0, 170.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(380.0, 170.0), mods(), &mut tcx.ctx());
+        assert_ne!(e.page().shape(&container).unwrap().bounding_box, before);
+
+        // One undo, because growing the container is part of the same gesture.
+        e.undo();
+        assert_eq!(
+            e.page().shape(&container).unwrap().bounding_box,
+            before,
+            "the container should return to its size"
+        );
+        assert_eq!(
+            e.page().shape(&dropped).unwrap().bounding_box.x,
+            500.0,
+            "and the shape to where it started"
+        );
     }
 
     #[test]
@@ -4709,8 +5695,10 @@ mod tests {
         e.create_connector(
             Some(a),
             BoundingBox::new(0.0, 0.0, 50.0, 40.0).center(),
+            None,
             Some(b),
             BoundingBox::new(200.0, 0.0, 50.0, 40.0).center(),
+            None,
         );
         let line_id = e.page().lines()[0].id.clone();
         if let Some(line) = e.package.document.pages[0].line_mut(&line_id) {

@@ -330,6 +330,27 @@ fn insert_menu(editor: &Editor, view: &ViewState) -> Menu {
         MenuItem::separator(),
     ];
 
+    // One item per CSV the package carries, naming the column the link
+    // matches on. A document with no data directory shows nothing here
+    // rather than a dimmed command that could never run.
+    let sources = editor.data_sources();
+    if !sources.is_empty() {
+        for source in &sources {
+            let Some(key) = source.headers.first() else {
+                continue;
+            };
+            items.push(MenuItem::new(
+                &format!("Link Data: {} by {}", source.name, key.trim()),
+                "",
+                UiAction::LinkData {
+                    source: source.name.clone(),
+                    key_column: key.trim().to_string(),
+                },
+            ));
+        }
+        items.push(MenuItem::separator());
+    }
+
     // The palette can only show one library at a time, so choosing one here is
     // how the other six are reached.
     for library in ShapeLibrary::ALL {
@@ -599,6 +620,35 @@ mod tests {
         assert_eq!(
             titles,
             vec!["File", "Edit", "Select", "Insert", "Format", "Arrange", "View", "Help"]
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_data_offers_no_link_command() {
+        let insert = built(&editor()).into_iter().find(|m| m.title == "Insert").unwrap();
+        assert!(
+            !insert.items.iter().any(|i| i.label.starts_with("Link Data")),
+            "a dimmed command that could never run is worse than none"
+        );
+    }
+
+    #[test]
+    fn each_bundled_csv_gets_a_link_command_naming_its_key_column() {
+        let mut e = editor();
+        e.package
+            .data
+            .insert("records.csv".into(), b"id,owner\n1,ops\n".to_vec());
+
+        let insert = built(&e).into_iter().find(|m| m.title == "Insert").unwrap();
+        let item = insert
+            .items
+            .iter()
+            .find(|i| i.label.starts_with("Link Data"))
+            .expect("the source should be offered");
+        assert_eq!(item.label, "Link Data: records.csv by id");
+        assert_eq!(
+            item.action,
+            UiAction::LinkData { source: "records.csv".into(), key_column: "id".into() }
         );
     }
 
