@@ -851,6 +851,9 @@ fn style_properties(style: &TextStyle) -> Vec<StyleProperty<'static, Brush>> {
         }),
         StyleProperty::Underline(style.underline),
         StyleProperty::Strikethrough(style.strikethrough),
+        // Matches what the renderer does with a word too long to fit, so the
+        // caret sits where the glyphs will be once the edit is committed.
+        StyleProperty::OverflowWrap(parley::OverflowWrap::BreakWord),
     ]
 }
 

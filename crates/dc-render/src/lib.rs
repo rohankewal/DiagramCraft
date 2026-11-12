@@ -641,7 +641,11 @@ impl Renderer {
         } else {
             transform
         };
-        text::draw(scene, &block, area, full);
+        // Clipped to the whole box rather than to the inset text area: the
+        // insets exist to keep text off the outline, not to crop a label
+        // that has outgrown its shape.
+        let box_ = Rect::new(bb.x, bb.y, bb.right(), bb.bottom());
+        text::draw_clipped(scene, &block, area, full, Some(box_));
     }
 
     #[allow(clippy::too_many_arguments)]

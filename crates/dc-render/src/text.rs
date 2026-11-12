@@ -12,8 +12,8 @@ use dc_model::{ParsedText, TextAlign, TextStyle, VerticalAlign};
 use kurbo::{Affine, Rect};
 use parley::style::{FontFamilyName, FontStyle, FontWeight, GenericFamily};
 use parley::{
-    Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, PositionedLayoutItem,
-    StyleProperty,
+    Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, OverflowWrap,
+    PositionedLayoutItem, StyleProperty,
 };
 use peniko::{Brush, Color as PenikoColor, Fill};
 use vello::Scene;
@@ -121,6 +121,11 @@ impl TextEngine {
         builder.push_default(StyleProperty::FontFamily(base_stack.as_slice().into()));
         builder.push_default(StyleProperty::FontSize(base.font_size_pt as f32));
         builder.push_default(StyleProperty::Brush(Brush::Solid(to_peniko(base.color))));
+        // A word longer than the shape is wide has no break opportunity, and
+        // without this it runs out past both edges rather than wrapping. Only
+        // words that would otherwise overflow are broken, so ordinary text
+        // still breaks between words.
+        builder.push_default(StyleProperty::OverflowWrap(OverflowWrap::BreakWord));
 
         // Per-run styling, keyed by byte ranges into the flattened text.
         let mut offset = 0usize;
@@ -193,15 +198,32 @@ impl TextEngine {
 ///
 /// `transform` maps document space to the target surface.
 pub fn draw(scene: &mut Scene, block: &TextBlock, rect: Rect, transform: Affine) {
+    draw_clipped(scene, block, rect, transform, None);
+}
+
+/// As [`draw`], but confined to `clip`.
+///
+/// More lines than the shape is tall still overflow — making them fit is the
+/// author's decision, not the renderer's — but the overflow is kept inside
+/// the shape it belongs to instead of painting over its neighbours.
+pub fn draw_clipped(
+    scene: &mut Scene,
+    block: &TextBlock,
+    rect: Rect,
+    transform: Affine,
+    clip: Option<Rect>,
+) {
     if block.is_empty() {
         return;
     }
 
-    let dy = match block.vertical_align {
-        VerticalAlign::Top => 0.0,
-        VerticalAlign::Center => (rect.height() - block.height()) / 2.0,
-        VerticalAlign::Bottom => rect.height() - block.height(),
-    };
+    // Only overflowing text needs a layer; the common case pays nothing.
+    let clip = clip.filter(|c| block.height() > c.height() || block.width() > c.width());
+    if let Some(c) = clip {
+        scene.push_clip_layer(Fill::NonZero, transform, &c);
+    }
+
+    let dy = vertical_offset(block.height(), rect.height(), block.vertical_align);
     // Horizontal placement comes from Parley's own alignment within the
     // layout's advance width, so only the block origin is applied here.
     let origin = Affine::translate((rect.x0, rect.y0 + dy));
@@ -266,6 +288,24 @@ pub fn draw(scene: &mut Scene, block: &TextBlock, rect: Rect, transform: Affine)
             }
         }
     }
+
+    if clip.is_some() {
+        scene.pop_layer();
+    }
+}
+
+/// Where a block sits within an area of `area_height`, vertically.
+///
+/// Text taller than its area would otherwise be centred on its own overflow,
+/// losing its first line as readily as its last. Pinning it to the top means
+/// it reads from the beginning and only the tail runs off the bottom.
+fn vertical_offset(block_height: f64, area_height: f64, align: VerticalAlign) -> f64 {
+    let dy = match align {
+        VerticalAlign::Top => 0.0,
+        VerticalAlign::Center => (area_height - block_height) / 2.0,
+        VerticalAlign::Bottom => area_height - block_height,
+    };
+    dy.max(0.0)
 }
 
 pub fn to_peniko(c: dc_model::Color) -> PenikoColor {
@@ -307,6 +347,91 @@ mod tests {
         let parsed = markup::parse("", TextStyle::default());
         let block = e.layout(&parsed, Some(200.0));
         assert!(block.is_empty());
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_is_broken_rather_than_overflowing() {
+        let mut e = engine();
+        let parsed = markup::parse("Supercalifragilisticexpialidocious", TextStyle::default());
+
+        // No space to break at, so without overflow-wrap this would lay out
+        // as one line running past both edges of its shape.
+        let block = e.layout(&parsed, Some(60.0));
+        assert!(
+            block.width() <= 60.0,
+            "the longest line should fit the width, was {}",
+            block.width()
+        );
+        assert!(block.layout.len() > 1, "it should have taken more than one line");
+    }
+
+    #[test]
+    fn an_ordinary_word_is_not_broken_when_it_fits() {
+        let mut e = engine();
+        let parsed = markup::parse("Validate fields", TextStyle::default());
+        let block = e.layout(&parsed, Some(400.0));
+        assert_eq!(
+            block.layout.len(),
+            1,
+            "breaking only applies to words that would otherwise overflow"
+        );
+    }
+
+    #[test]
+    fn text_that_fits_honours_its_vertical_alignment() {
+        assert_eq!(vertical_offset(20.0, 100.0, VerticalAlign::Top), 0.0);
+        assert_eq!(vertical_offset(20.0, 100.0, VerticalAlign::Center), 40.0);
+        assert_eq!(vertical_offset(20.0, 100.0, VerticalAlign::Bottom), 80.0);
+    }
+
+    #[test]
+    fn text_taller_than_its_area_starts_at_the_top() {
+        // Centring would put the overflow across both edges, losing the
+        // first line as readily as the last; bottom alignment would lose the
+        // beginning outright.
+        for align in [VerticalAlign::Top, VerticalAlign::Center, VerticalAlign::Bottom] {
+            assert_eq!(
+                vertical_offset(140.0, 40.0, align),
+                0.0,
+                "{align:?} should pin overflowing text to the top"
+            );
+        }
+    }
+
+    #[test]
+    fn an_overflowing_block_is_clipped_to_its_shape() {
+        let mut e = engine();
+        let parsed = markup::parse(&"word ".repeat(40), TextStyle::default());
+        let block = e.layout(&parsed, Some(80.0));
+        let area = Rect::new(0.0, 0.0, 80.0, 20.0);
+        assert!(block.height() > area.height(), "the fixture must overflow to be a test");
+
+        let mut clipped = Scene::new();
+        draw_clipped(&mut clipped, &block, area, Affine::IDENTITY, Some(area));
+        let mut loose = Scene::new();
+        draw_clipped(&mut loose, &block, area, Affine::IDENTITY, None);
+
+        // The clipped pass pushes and pops a layer the loose one does not.
+        assert!(
+            clipped.encoding().n_clips > loose.encoding().n_clips,
+            "overflowing text should be drawn inside a clip layer"
+        );
+    }
+
+    #[test]
+    fn a_block_that_fits_is_not_wrapped_in_a_clip_layer() {
+        let mut e = engine();
+        let parsed = markup::parse("Short", TextStyle::default());
+        let block = e.layout(&parsed, Some(200.0));
+        let area = Rect::new(0.0, 0.0, 200.0, 100.0);
+
+        let mut scene = Scene::new();
+        draw_clipped(&mut scene, &block, area, Affine::IDENTITY, Some(area));
+        assert_eq!(
+            scene.encoding().n_clips,
+            0,
+            "the common case should not pay for a layer"
+        );
     }
 
     #[test]
@@ -423,3 +548,4 @@ mod tests {
         }
     }
 }
+

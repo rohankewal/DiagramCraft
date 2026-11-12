@@ -211,7 +211,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 961 tests
+cargo test --workspace     # 967 tests
 ```
 
 ## Scope
@@ -232,6 +232,11 @@ Known limits:
   writes that row into `customData`, which the format does publish. There is
   no live binding back to the CSV, because the format defines none; re-running
   the link after the data changes refreshes the values in place.
+- **Text is not shrunk to fit.** A word too long for its shape is broken so
+  it wraps rather than running out past the edges, but a label with more
+  lines than the shape is tall still overflows — clipped to the shape, and
+  pinned to the top so it reads from the beginning. Making it fit is the
+  author's decision; there is no autofit that quietly changes a font size.
 - **Cloud icon artwork.** AWS, Azure, and GCP shapes carry a `className` naming
   an icon whose artwork the format does not ship. They import, draw as a tile
   with the vendor's mark and the shape's text, stay editable, and save with the
