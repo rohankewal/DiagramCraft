@@ -21,18 +21,21 @@ pub mod document;
 pub mod geom;
 pub mod line;
 pub mod markup;
+pub mod rules;
 pub mod shape;
 pub mod style;
 mod string_enum;
 
 pub use color::Color;
 pub use document::{
+    Guide,
     Collection, Document, DocumentSettings, ExtensionBootstrapData, FORMAT_VERSION, Group, Layer,
     Page, PageSettings, PageSize, Units,
 };
 pub use geom::{BoundingBox, Point, RelPoint};
 pub use markup::{ParsedText, TextRun};
 pub use line::{Endpoint, EndpointStyle, LabelSide, Line, LineLabel, LineType};
+pub use rules::{CATEGORY_COLORS, FormatRule, RuleOp};
 pub use shape::{Action, CloudVendor, CustomDataEntry, ImageRef, Shape, ShapeLibrary, ShapeType, StarShape};
 pub use style::{
     Fill, ImageScale, Stroke, StrokeStyle, Style, Text, TextAlign, TextStyle, VerticalAlign,

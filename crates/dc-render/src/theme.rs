@@ -37,6 +37,8 @@ pub struct Theme {
     pub marquee_stroke: Color,
     /// Highlight ring on a shape a connector would attach to.
     pub attach_highlight: Color,
+    /// A guide the author placed, which stays on the page.
+    pub placed_guide: Color,
 
     /// Panel and toolbar backgrounds.
     pub panel: Color,
@@ -84,6 +86,7 @@ impl Theme {
             marquee_fill: Color::rgba(0x4f, 0x46, 0xe5, 0x1a),
             marquee_stroke: Color::rgb(0x4f, 0x46, 0xe5),
             attach_highlight: Color::rgb(0x10, 0xb9, 0x81),
+            placed_guide: Color::rgb(0x38, 0xbd, 0xf8),
 
             panel: Color::rgb(0xff, 0xff, 0xff),
             panel_border: Color::rgb(0xe2, 0xe6, 0xec),
@@ -115,6 +118,7 @@ impl Theme {
             marquee_fill: Color::rgba(0x81, 0x7a, 0xf6, 0x26),
             marquee_stroke: Color::rgb(0x81, 0x7a, 0xf6),
             attach_highlight: Color::rgb(0x34, 0xd3, 0x99),
+            placed_guide: Color::rgb(0x0e, 0xa5, 0xe9),
 
             panel: Color::rgb(0x1a, 0x1e, 0x27),
             panel_border: Color::rgb(0x2b, 0x31, 0x3d),
@@ -151,6 +155,8 @@ pub struct Metrics {
     pub port_radius: f64,
     /// Radius of a quick-connect arrow sitting outside a shape's edge.
     pub quick_connect_radius: f64,
+    /// Thickness of the rulers along the top and left of the canvas.
+    pub ruler_thickness: f64,
     /// Distance at which a drag snaps to a guide.
     pub snap_threshold: f64,
     pub corner_radius: f64,
@@ -171,6 +177,7 @@ impl Default for Metrics {
             // not something to grab and drag.
             port_radius: 4.0,
             quick_connect_radius: 5.0,
+            ruler_thickness: 18.0,
             snap_threshold: 6.0,
             corner_radius: 6.0,
         }

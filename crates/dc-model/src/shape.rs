@@ -531,6 +531,15 @@ pub struct Shape {
     /// Arbitrary key-value pairs attached to the shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_data: Option<Vec<CustomDataEntry>>,
+    /// Whether the shape is pinned against editing.
+    ///
+    /// An extension: the published specification gives layers a lock but not
+    /// shapes. It is written only once something sets it, and a reader that
+    /// does not know the key carries it through untouched the same way it
+    /// carries any other field it does not interpret — so adding it costs a
+    /// round trip nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
 
     /// Required on the image block, which carries its stroke outside `style`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -655,6 +664,7 @@ impl Shape {
             z_index: None,
             actions: None,
             custom_data: None,
+            locked: None,
             stroke: None,
             image: None,
             right_facing: None,
@@ -754,6 +764,11 @@ impl Shape {
     }
 
     /// Whether contained shapes move with this container. Defaults to true.
+    /// Whether the shape refuses to be moved, resized, or deleted.
+    pub fn is_locked(&self) -> bool {
+        self.locked.unwrap_or(false)
+    }
+
     pub fn is_magnetized(&self) -> bool {
         self.magnetize.unwrap_or(true)
     }

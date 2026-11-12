@@ -370,6 +370,47 @@ fn insert_menu(editor: &Editor, view: &ViewState) -> Menu {
 /// Text formatting. Lucidchart puts these on a context toolbar rather than in
 /// a menu; in a desktop application they belong in the menu bar, where their
 /// shortcuts are visible.
+/// Whether Tidy Up has at least two shapes to arrange.
+///
+/// It acts on the selection when there is one and on the page otherwise, so
+/// the condition has to ask about whichever of the two it would use.
+fn can_tidy(editor: &Editor) -> bool {
+    if editor.selection.is_empty() {
+        editor.page().shapes().len() >= 2
+    } else {
+        editor
+            .selection
+            .iter()
+            .filter(|id| editor.page().shape(id).is_some())
+            .count()
+            >= 2
+    }
+}
+
+/// The data-driven colouring block of the Format menu.
+///
+/// One item per field the page actually carries, so the command names a
+/// field that exists rather than asking for one to be typed.
+fn conditional_items(editor: &Editor) -> Vec<MenuItem> {
+    let fields = editor.data_fields();
+    if fields.is_empty() {
+        return Vec::new();
+    }
+    let mut items = vec![MenuItem::separator()];
+    for field in fields {
+        items.push(MenuItem::new(
+            &format!("Colour by {field}"),
+            "",
+            UiAction::ColorByField(field.clone()),
+        ));
+    }
+    if !editor.format_rules().is_empty() {
+        items.push(MenuItem::new("Reapply Formatting", "", UiAction::ApplyFormatRules));
+        items.push(MenuItem::new("Clear Formatting Rules", "", UiAction::ClearFormatRules));
+    }
+    items
+}
+
 fn format_menu(editor: &Editor) -> Menu {
     let can_format = !editor.selection.is_empty() || editor.is_editing();
     let on = |which: TextToggle| editor.text_style_is_on(which);
@@ -413,7 +454,10 @@ fn format_menu(editor: &Editor) -> Menu {
                 .enabled_when(can_format),
             MenuItem::new("Text Bottom", "", UiAction::SetVerticalAlign(dc_model::VerticalAlign::Bottom))
                 .enabled_when(can_format),
-        ],
+        ]
+        .into_iter()
+        .chain(conditional_items(editor))
+        .collect(),
     }
 }
 
@@ -455,6 +499,24 @@ fn arrange_menu(editor: &Editor) -> Menu {
             MenuItem::new("Group", "⌘G", UiAction::Group).enabled_when(several),
             MenuItem::new("Ungroup", "Shift ⌘G", UiAction::Ungroup)
                 .enabled_when(editor.selection_is_grouped()),
+            MenuItem::separator(),
+            MenuItem::check(
+                "Lock",
+                "",
+                UiAction::SetLocked(!editor.selection_is_locked()),
+                editor.selection_is_locked(),
+            )
+            .enabled_when(editor.selection_has_shapes()),
+            MenuItem::new("Tidy Up (Vertical)", "", UiAction::TidyLayout(true))
+                .enabled_when(can_tidy(editor)),
+            MenuItem::new("Tidy Up (Horizontal)", "", UiAction::TidyLayout(false))
+                .enabled_when(can_tidy(editor)),
+            MenuItem::separator(),
+            MenuItem::new("Fit Container to Contents", "", UiAction::FitContainer)
+                .enabled_when(editor.selection_has_container()),
+            MenuItem::separator(),
+            MenuItem::new("Unlock All", "", UiAction::UnlockAll)
+                .enabled_when(editor.page().shapes().iter().any(|s| s.is_locked())),
         ],
     }
 }
@@ -472,6 +534,18 @@ fn view_menu(editor: &Editor, view: &ViewState) -> Menu {
             MenuItem::separator(),
             MenuItem::check("Show Grid", "", UiAction::ToggleGrid, view.settings.show_grid),
             MenuItem::check("Show Page Bounds", "", UiAction::TogglePageBounds, view.settings.show_page_bounds),
+            MenuItem::check(
+                "Show Rulers",
+                "",
+                UiAction::ChangeSetting(crate::ui::SettingChange::ShowRulers(
+                    !view.settings.show_rulers,
+                )),
+                view.settings.show_rulers,
+            ),
+            MenuItem::new("Guides from Selection", "", UiAction::GuidesFromSelection)
+                .enabled_when(!editor.selection.is_empty()),
+            MenuItem::new("Clear Guides", "", UiAction::ClearGuides)
+                .enabled_when(!editor.page_guides().is_empty()),
             MenuItem::check("Snap to Guides", "", UiAction::ToggleSnap, editor.snap_enabled),
             MenuItem::check(
                 "Route Around Shapes",
@@ -558,6 +632,24 @@ fn selection_context_menu(editor: &Editor) -> Menu {
             MenuItem::new("Group", "⌘G", UiAction::Group).enabled_when(several),
             MenuItem::new("Ungroup", "Shift ⌘G", UiAction::Ungroup)
                 .enabled_when(editor.selection_is_grouped()),
+            MenuItem::separator(),
+            MenuItem::check(
+                "Lock",
+                "",
+                UiAction::SetLocked(!editor.selection_is_locked()),
+                editor.selection_is_locked(),
+            )
+            .enabled_when(editor.selection_has_shapes()),
+            MenuItem::new("Tidy Up (Vertical)", "", UiAction::TidyLayout(true))
+                .enabled_when(can_tidy(editor)),
+            MenuItem::new("Tidy Up (Horizontal)", "", UiAction::TidyLayout(false))
+                .enabled_when(can_tidy(editor)),
+            MenuItem::separator(),
+            MenuItem::new("Fit Container to Contents", "", UiAction::FitContainer)
+                .enabled_when(editor.selection_has_container()),
+            MenuItem::separator(),
+            MenuItem::new("Unlock All", "", UiAction::UnlockAll)
+                .enabled_when(editor.page().shapes().iter().any(|s| s.is_locked())),
         ],
     }
 }

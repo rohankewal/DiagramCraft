@@ -37,7 +37,13 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - Cut, copy, and paste, including between two running copies
 - Multi-page documents: add, duplicate, rename, delete, and drag to reorder
 - Containers that carry their contents: drop a shape into a pool or swimlane
-  and it travels with the container, which grows to take in what overhangs
+  and it travels with the container, which grows to take in what overhangs,
+  scales what is inside when resized, and can be fitted back around them
+- Tidy Up: a layered arrangement that follows the connectors, so a flowchart
+  or an org chart orders itself instead of being dragged into shape
+- Lock a shape in place — it still selects, so it can be unlocked, but it
+  refuses to move, resize, or be deleted
+- Rulers, and guides dragged off them that shapes snap to
 
 **Text**
 - Edit labels in place: double-click a shape or connector, or press Enter
@@ -74,6 +80,8 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - Bundled images decoded and drawn, clipped to any shape outline
 - CSV data linking: match shape labels against a column of a bundled data
   source and the row's columns land in the shape's data panel
+- Conditional formatting: colour every shape by one of its data fields, with
+  the rules it derived kept on the document so the colours can be retraced
 - PNG export, headless and scriptable
 - SVG and PDF export, as real vectors with real text: labels stay selectable
   and searchable, and a PDF embeds no font because the families the editor
@@ -217,7 +225,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 996 tests
+cargo test --workspace     # 1052 tests
 ```
 
 ## Scope
@@ -234,6 +242,15 @@ Known limits:
   decided by where a shape sits: a shape counts as inside when its centre is
   within the container. Nothing about the relationship is written to the file,
   which is why it survives a round trip — there is nothing to survive.
+- **Conditional formatting is applied, not live.** Running it writes the
+  colours onto the shapes, so the canvas, SVG, and PDF all show the same
+  thing without any of them needing to know rules exist. Changing the data
+  afterwards does not recolour anything until the rules are run again.
+- **Three fields are extensions.** A shape's lock, a page's guides, and the
+  document's formatting rules have no published counterpart, so they are
+  written under names of our own (`locked`, `dcGuides`, `dcFormatRules`).
+  The format already carries fields a reader does not interpret, so these
+  cost a round trip nothing — but another tool will not act on them.
 - **Data links are a one-time copy.** Matching a shape label against a column
   writes that row into `customData`, which the format does publish. There is
   no live binding back to the CSV, because the format defines none; re-running

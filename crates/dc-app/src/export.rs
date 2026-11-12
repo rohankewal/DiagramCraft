@@ -121,6 +121,7 @@ pub fn render_editor_png(
     library: dc_model::ShapeLibrary,
     open_menu: Option<usize>,
     settings_open: bool,
+    rulers: bool,
     path: impl AsRef<Path>,
 ) -> Result<(u32, u32), Error> {
     use crate::menu::ViewState;
@@ -129,7 +130,11 @@ pub fn render_editor_png(
 
     let metrics = Metrics::default();
     let view = ViewState {
-        settings: crate::settings::Settings { dark_theme: dark, ..Default::default() },
+        settings: crate::settings::Settings {
+            dark_theme: dark,
+            show_rulers: rulers,
+            ..Default::default()
+        },
         library,
         settings_open,
         ..Default::default()
@@ -184,6 +189,7 @@ pub fn render_editor_png(
         renderer.text_engine(),
         None,
         &editor.status,
+        &editor.camera,
     );
 
     if editing_tab {

@@ -40,6 +40,7 @@ USAGE:
     diagramcraft preview <IN.lucid> <OUT.png> [--dark] [--editing]
                                               [--menu NAME] [--library NAME]
                                               [--hover] [--connect]
+                                              [--tidy] [--across] [--rulers]
                                               [--settings] [--bold] [--line]
     diagramcraft --help
 ";
@@ -275,6 +276,20 @@ fn run_preview(args: &[String]) -> ExitCode {
         }
     }
 
+    // `--tidy` runs the automatic arrangement, so the result can be looked
+    // at rather than only asserted about.
+    if args.iter().any(|a| a == "--tidy") {
+        editor.tidy_layout(!args.iter().any(|a| a == "--across"));
+    }
+
+    // `--rulers` turns the rulers on and places a few guides, so both can
+    // be looked at in a screenshot.
+    if args.iter().any(|a| a == "--rulers") {
+        editor.selection = editor.page().shapes().first().map(|s| s.id.clone()).into_iter().collect();
+        editor.guides_from_selection();
+        editor.clear_selection();
+    }
+
     // Opens the first label so a screenshot can show the editing state.
     if editing {
         let mut fonts = parley::FontContext::new();
@@ -309,6 +324,7 @@ fn run_preview(args: &[String]) -> ExitCode {
         library,
         open_menu,
         settings_open,
+        args.iter().any(|a| a == "--rulers"),
         Path::new(output),
     ) {
         Ok((w, h)) => {

@@ -270,9 +270,26 @@ pub struct Page {
     pub data_backed_shapes: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_data: Option<Value>,
+    /// Guides the author placed on this page, under a namespaced key.
+    ///
+    /// An extension: the published specification has no guides. The prefix
+    /// keeps it from colliding with a field the format may add later, and a
+    /// reader that does not know it carries it through untouched.
+    #[serde(rename = "dcGuides", default, skip_serializing_if = "Option::is_none")]
+    pub guides: Option<Vec<Guide>>,
 
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
     pub extra: Map<String, Value>,
+}
+
+/// A straight line an author placed to align things against.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Guide {
+    /// Where it sits, in document units: an x for a vertical guide and a y
+    /// for a horizontal one.
+    pub at: f64,
+    /// Whether the line runs down the page rather than across it.
+    pub vertical: bool,
 }
 
 impl Page {
@@ -286,6 +303,7 @@ impl Page {
             groups: None,
             layers: None,
             data_backed_shapes: None,
+            guides: None,
             custom_data: None,
             extra: Map::new(),
         }
@@ -297,6 +315,11 @@ impl Page {
 
     pub fn lines(&self) -> &[Line] {
         self.lines.as_deref().unwrap_or(&[])
+    }
+
+    /// The guides placed on this page.
+    pub fn guides(&self) -> &[Guide] {
+        self.guides.as_deref().unwrap_or(&[])
     }
 
     pub fn groups(&self) -> &[Group] {
@@ -402,6 +425,16 @@ pub struct Document {
     pub document_settings: Option<DocumentSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_bootstrap_data: Option<ExtensionBootstrapData>,
+    /// Conditional-formatting rules, under a namespaced key.
+    ///
+    /// An extension: the published specification has none. The name is
+    /// prefixed so it cannot collide with a field the format may add later.
+    #[serde(
+        rename = "dcFormatRules",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub format_rules: Option<Vec<crate::rules::FormatRule>>,
 
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
     pub extra: Map<String, Value>,
@@ -419,6 +452,7 @@ impl Document {
             pages: vec![Page::new("page1", "Page 1")],
             document_settings: None,
             extension_bootstrap_data: None,
+            format_rules: None,
             extra: Map::new(),
         }
     }

@@ -427,6 +427,7 @@ impl Editor {
             attach_target: self.attach_target.as_deref(),
             marquee,
             snap_guides: &self.guides,
+            placed_guides: self.page().guides(),
             pending_connector,
             ports: &self.ports,
             quick_connect: &self.quick_connect,
@@ -887,7 +888,11 @@ impl Editor {
                         }
 
                         // Only shapes move; a connector follows its endpoints.
-                        if self.selection.iter().any(|s| self.page().shape(s).is_some()) {
+                        // A locked shape is still selected by the click above,
+                        // so it can be unlocked, but it starts no drag.
+                        if self.selection.iter().any(|s| self.page().shape(s).is_some())
+                            && !self.selection_has_locked()
+                        {
                             let originals = self.move_set_boxes();
                             self.drag = Some(Drag::Move { start: doc_point, originals });
                         }
@@ -925,6 +930,9 @@ impl Editor {
         let Some(original_bounds) = self.selection_bounds() else {
             return;
         };
+        if self.selection_has_locked() {
+            return;
+        }
 
         if handle == HandleKind::Rotate {
             // Rotation applies to a single shape; a group rotation would need
@@ -953,9 +961,82 @@ impl Editor {
         self.drag = Some(Drag::Resize {
             handle,
             start: doc_point,
-            originals: self.selected_shape_boxes(),
+            // A container scales what is inside it, the same set a drag of
+            // the container carries. Stretching a pool and leaving its
+            // contents at their old size would undo the point of a pool.
+            originals: self.move_set_boxes(),
             original_bounds,
         });
+    }
+
+    /// Shrinks or grows a container to fit exactly what sits inside it.
+    ///
+    /// The counterpart to absorbing on drop: that grows a container when
+    /// something lands over its edge, this tightens one that has been left
+    /// larger than it needs to be.
+    pub fn fit_container_to_contents(&mut self) {
+        let containers: Vec<String> = self
+            .selection
+            .iter()
+            .filter(|id| {
+                self.page()
+                    .shape(id)
+                    .is_some_and(|s| s.shape_type.is_container())
+            })
+            .cloned()
+            .collect();
+        if containers.is_empty() {
+            self.status = "Select a container to fit".into();
+            return;
+        }
+
+        let mut fitted = 0;
+        let mut pending: Vec<(String, BoundingBox)> = Vec::new();
+        for id in &containers {
+            let members = self.contained_ids(id);
+            if members.is_empty() {
+                continue;
+            }
+            let Some(shape) = self.page().shape(id) else {
+                continue;
+            };
+            let mut bounds: Option<BoundingBox> = None;
+            for member in &members {
+                if let Some(m) = self.page().shape(member) {
+                    let padded = m.bounding_box.aabb().inflated(CONTAINER_PADDING);
+                    bounds = Some(match bounds {
+                        Some(b) => b.union(&padded),
+                        None => padded,
+                    });
+                }
+            }
+            if let Some(bounds) = bounds {
+                pending.push((id.clone(), bounds.with_rotation(shape.bounding_box.rotation_degrees())));
+                fitted += 1;
+            }
+        }
+
+        if pending.is_empty() {
+            self.status = "That container is empty".into();
+            return;
+        }
+
+        self.begin_change();
+        for (id, bounds) in pending {
+            if let Some(shape) = self.page_mut().shape_mut(&id) {
+                shape.bounding_box = bounds;
+            }
+        }
+        self.status = format!("Fitted {fitted} container(s) to their contents");
+    }
+
+    /// Whether the selection holds a container, which is what the menu asks.
+    pub fn selection_has_container(&self) -> bool {
+        self.selection.iter().any(|id| {
+            self.page()
+                .shape(id)
+                .is_some_and(|s| s.shape_type.is_container())
+        })
     }
 
     fn selected_shape_boxes(&self) -> Vec<(String, BoundingBox)> {
@@ -1015,6 +1096,81 @@ impl Editor {
             .filter(|s| bounds.contains(s.bounding_box.center()))
             .map(|s| s.id.clone())
             .collect()
+    }
+
+    /// Whether a shape is pinned against editing.
+    pub fn is_locked(&self, id: &str) -> bool {
+        self.page().shape(id).is_some_and(|s| s.is_locked())
+    }
+
+    /// Whether anything in the selection is locked.
+    ///
+    /// A locked shape stays selectable on purpose — a shape that could not be
+    /// picked could not be unlocked either — so every command that would
+    /// change its geometry checks here instead.
+    pub fn selection_has_locked(&self) -> bool {
+        self.selection.iter().any(|id| self.is_locked(id))
+    }
+
+    /// Whether every selected shape is locked, which is what the menu's
+    /// check mark reflects.
+    pub fn selection_is_locked(&self) -> bool {
+        let shapes: Vec<&String> = self
+            .selection
+            .iter()
+            .filter(|id| self.page().shape(id).is_some())
+            .collect();
+        !shapes.is_empty() && shapes.iter().all(|id| self.is_locked(id))
+    }
+
+    /// Locks or unlocks the selected shapes.
+    pub fn set_selection_locked(&mut self, locked: bool) {
+        let ids: Vec<String> = self
+            .selection
+            .iter()
+            .filter(|id| self.page().shape(id).is_some())
+            .cloned()
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.begin_change();
+        for id in &ids {
+            if let Some(shape) = self.page_mut().shape_mut(id) {
+                // Cleared rather than set to false, so an unlocked shape
+                // writes no key at all and the file stays as it was.
+                shape.locked = locked.then_some(true);
+            }
+        }
+        self.status = if locked {
+            format!("Locked {} shape(s)", ids.len())
+        } else {
+            format!("Unlocked {} shape(s)", ids.len())
+        };
+    }
+
+    /// Unlocks every shape on the page.
+    ///
+    /// The way out of having locked something and forgotten where.
+    pub fn unlock_all(&mut self) {
+        let ids: Vec<String> = self
+            .page()
+            .shapes()
+            .iter()
+            .filter(|s| s.is_locked())
+            .map(|s| s.id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.status = "Nothing on this page is locked".into();
+            return;
+        }
+        self.begin_change();
+        for id in &ids {
+            if let Some(shape) = self.page_mut().shape_mut(id) {
+                shape.locked = None;
+            }
+        }
+        self.status = format!("Unlocked {} shape(s)", ids.len());
     }
 
     /// A shape's connection points, in document coordinates.
@@ -1318,10 +1474,25 @@ impl Editor {
                 // neighbour should stay lined up with it rather than being
                 // pulled onto the nearest grid line.
                 let mut aligned = false;
-                if self.snap_enabled {
+                let threshold = self.camera.screen_to_doc_scalar(self.snap_threshold_px);
+
+                // A guide the author placed is more specific than two shapes
+                // happening to line up, so it is tried first and wins.
+                let placed = self.page().guides().to_vec();
+                if !placed.is_empty() {
+                    let moved = first.translated(dx, dy);
+                    let result = snap::snap_box_to_guides(moved, &placed, threshold);
+                    if result.is_snapped() {
+                        dx += result.dx;
+                        dy += result.dy;
+                        self.guides = result.guides;
+                        aligned = true;
+                    }
+                }
+
+                if !aligned && self.snap_enabled {
                     let moved = first.translated(dx, dy);
                     let others = self.other_shape_boxes(originals);
-                    let threshold = self.camera.screen_to_doc_scalar(self.snap_threshold_px);
                     let result = snap::snap_box(moved, &others, threshold);
 
                     if result.is_snapped() {
@@ -1878,15 +2049,30 @@ impl Editor {
         if self.selection.is_empty() {
             return;
         }
+        // A locked shape is kept, and kept selected, so that deleting a
+        // mixed selection does not quietly take it with the rest.
+        let (kept, removable): (Vec<String>, Vec<String>) = std::mem::take(&mut self.selection)
+            .into_iter()
+            .partition(|id| self.is_locked(id));
+        if removable.is_empty() {
+            self.selection = kept;
+            self.status = "That shape is locked".into();
+            return;
+        }
+
         self.begin_change();
-        let ids = std::mem::take(&mut self.selection);
         let page = self.page_mut();
-        for id in &ids {
+        for id in &removable {
             if !page.remove_shape(id) {
                 page.remove_line(id);
             }
         }
-        self.status = format!("Deleted {} item(s)", ids.len());
+        self.selection = kept;
+        self.status = if self.selection.is_empty() {
+            format!("Deleted {} item(s)", removable.len())
+        } else {
+            format!("Deleted {} item(s); {} locked", removable.len(), self.selection.len())
+        };
     }
 
     pub fn select_all(&mut self) {
@@ -2288,7 +2474,17 @@ impl Editor {
         if self.selection.is_empty() {
             return;
         }
-        let ids: Vec<String> = self.selection.clone();
+        // Nudging is a move like any other, so a locked shape refuses it.
+        let ids: Vec<String> = self
+            .selection
+            .iter()
+            .filter(|id| !self.is_locked(id))
+            .cloned()
+            .collect();
+        if ids.is_empty() {
+            self.status = "That shape is locked".into();
+            return;
+        }
         self.begin_change();
         for id in ids {
             if let Some(shape) = self.page_mut().shape_mut(&id) {
@@ -2879,6 +3075,354 @@ impl Editor {
             targets.len()
         );
         linked
+    }
+
+    // ---------------------------------------------------------------- guides
+
+    /// The guides on the current page.
+    pub fn page_guides(&self) -> &[dc_model::Guide] {
+        self.page().guides()
+    }
+
+    /// Places a guide, ignoring one that duplicates a guide already there.
+    pub fn add_guide(&mut self, at: f64, vertical: bool) {
+        let guide = dc_model::Guide { at, vertical };
+        if self
+            .page()
+            .guides()
+            .iter()
+            .any(|g| g.vertical == vertical && (g.at - at).abs() < 0.5)
+        {
+            return;
+        }
+        self.begin_change();
+        self.page_mut().guides.get_or_insert_with(Vec::new).push(guide);
+        self.status = if vertical {
+            format!("Guide at x {:.0}", at)
+        } else {
+            format!("Guide at y {:.0}", at)
+        };
+    }
+
+    /// Removes the guide nearest a point, within a tolerance.
+    pub fn remove_guide_near(&mut self, at: f64, vertical: bool, tolerance: f64) -> bool {
+        let found = self
+            .page()
+            .guides()
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.vertical == vertical && (g.at - at).abs() <= tolerance)
+            .min_by(|a, b| (a.1.at - at).abs().total_cmp(&(b.1.at - at).abs()))
+            .map(|(i, _)| i);
+
+        let Some(index) = found else {
+            return false;
+        };
+        self.begin_change();
+        if let Some(guides) = self.page_mut().guides.as_mut() {
+            guides.remove(index);
+            if guides.is_empty() {
+                self.page_mut().guides = None;
+            }
+        }
+        self.status = "Removed a guide".into();
+        true
+    }
+
+    /// Clears every guide on the page.
+    pub fn clear_guides(&mut self) {
+        if self.page().guides().is_empty() {
+            self.status = "This page has no guides".into();
+            return;
+        }
+        self.begin_change();
+        self.page_mut().guides = None;
+        self.status = "Cleared the guides".into();
+    }
+
+    /// Puts guides around the selection: one at each edge and one through
+    /// the middle, on both axes.
+    ///
+    /// The way to place a guide exactly, without aiming a drag off a ruler.
+    pub fn guides_from_selection(&mut self) {
+        let ids: Vec<String> = self.selection.clone();
+        let Some(bounds) = self.bounds_of(&ids) else {
+            self.status = "Select something to place guides around".into();
+            return;
+        };
+        let wanted = [
+            (bounds.x, true),
+            (bounds.center().x, true),
+            (bounds.right(), true),
+            (bounds.y, false),
+            (bounds.center().y, false),
+            (bounds.bottom(), false),
+        ];
+        self.as_one_change(|e| {
+            for (at, vertical) in wanted {
+                e.add_guide(at, vertical);
+            }
+        });
+        self.status = "Placed guides around the selection".into();
+    }
+
+    // ----------------------------------------------------------- auto layout
+
+    /// Arranges the diagram into ranks, following its connectors.
+    ///
+    /// Acts on the selection when there is one and on the whole page
+    /// otherwise, which is the same rule the data link follows. Locked
+    /// shapes are left exactly where they are — that is what locking them
+    /// said to do — and are excluded from the arrangement rather than
+    /// silently moved.
+    ///
+    /// The result is placed back over the middle of where the shapes were,
+    /// so tidying rearranges a diagram without also sending it somewhere
+    /// else on the canvas.
+    pub fn tidy_layout(&mut self, vertical: bool) -> usize {
+        let candidates: Vec<String> = if self.selection.is_empty() {
+            self.page().shapes().iter().map(|s| s.id.clone()).collect()
+        } else {
+            self.selection
+                .iter()
+                .filter(|id| self.page().shape(id).is_some())
+                .cloned()
+                .collect()
+        };
+
+        let movable: Vec<String> = candidates
+            .into_iter()
+            .filter(|id| !self.is_locked(id))
+            .collect();
+        if movable.len() < 2 {
+            self.status = "Select at least two unlocked shapes to tidy".into();
+            return 0;
+        }
+
+        let nodes: Vec<dc_geom::LayoutNode> = movable
+            .iter()
+            .filter_map(|id| {
+                let shape = self.page().shape(id)?;
+                let box_ = shape.bounding_box.aabb();
+                Some(dc_geom::LayoutNode { id: id.clone(), w: box_.w, h: box_.h })
+            })
+            .collect();
+
+        // Only connectors joining two shapes being arranged say anything
+        // about the order they belong in.
+        let edges: Vec<dc_geom::LayoutEdge> = self
+            .page()
+            .lines()
+            .iter()
+            .filter_map(|line| {
+                let from = line.endpoint1.shape_id()?.to_string();
+                let to = line.endpoint2.shape_id()?.to_string();
+                (movable.contains(&from) && movable.contains(&to))
+                    .then_some(dc_geom::LayoutEdge { from, to })
+            })
+            .collect();
+
+        let before = self.bounds_of(&movable);
+        let options = dc_geom::LayoutOptions { vertical, ..Default::default() };
+        let placed = dc_geom::layered(&nodes, &edges, options);
+        if placed.is_empty() {
+            return 0;
+        }
+
+        // Shift the whole arrangement so its centre lands where the old one
+        // was, rather than at the origin the layout works in.
+        let laid_out = placed.iter().fold(None::<BoundingBox>, |acc, (id, point)| {
+            let size = nodes.iter().find(|n| &n.id == id)?;
+            let box_ = BoundingBox::new(point.x, point.y, size.w, size.h);
+            Some(match acc {
+                Some(b) => b.union(&box_),
+                None => box_,
+            })
+        });
+        let (dx, dy) = match (before, laid_out) {
+            (Some(before), Some(after)) => (
+                before.center().x - after.center().x,
+                before.center().y - after.center().y,
+            ),
+            _ => (0.0, 0.0),
+        };
+
+        let moved = placed.len();
+        self.begin_change();
+        for (id, point) in placed {
+            if let Some(shape) = self.page_mut().shape_mut(&id) {
+                // Rotation is kept: tidying decides where a shape sits, not
+                // which way it faces.
+                let rotation = shape.bounding_box.rotation_degrees();
+                let box_ = shape.bounding_box.aabb();
+                shape.bounding_box =
+                    BoundingBox::new(point.x + dx, point.y + dy, box_.w, box_.h)
+                        .with_rotation(rotation);
+            }
+        }
+
+        self.status = format!("Tidied {moved} shape(s)");
+        moved
+    }
+
+    /// The box enclosing a set of shapes.
+    fn bounds_of(&self, ids: &[String]) -> Option<BoundingBox> {
+        ids.iter()
+            .filter_map(|id| self.page().shape(id))
+            .fold(None, |acc, shape| {
+                let box_ = shape.bounding_box.aabb();
+                Some(match acc {
+                    Some(b) => b.union(&box_),
+                    None => box_,
+                })
+            })
+    }
+
+    // ------------------------------------------------- conditional formatting
+
+    /// The formatting rules this document carries.
+    pub fn format_rules(&self) -> &[dc_model::FormatRule] {
+        self.package
+            .document
+            .format_rules
+            .as_deref()
+            .unwrap_or(&[])
+    }
+
+    /// Every custom-data key present on this page, in first-seen order.
+    ///
+    /// This is what the Colour by Data menu offers: the fields the document
+    /// actually has, rather than a box to type a name into and get wrong.
+    pub fn data_fields(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for shape in self.page().shapes() {
+            for entry in shape.custom_data.iter().flatten() {
+                let key = entry.key.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                if !seen.iter().any(|k| k.eq_ignore_ascii_case(key)) {
+                    seen.push(key.to_string());
+                }
+            }
+        }
+        seen
+    }
+
+    /// Builds one rule per distinct value of a field and applies them.
+    ///
+    /// Colouring by category is the conditional formatting people actually
+    /// reach for, and it needs no rule editor: the values are already in the
+    /// document, so the command can read them and assign a colour to each.
+    ///
+    /// The rules are kept on the document, so what produced the colours is
+    /// recorded rather than being a one-off nobody can retrace.
+    pub fn color_by_field(&mut self, field: &str) -> usize {
+        let mut values: Vec<String> = Vec::new();
+        for shape in self.page().shapes() {
+            for entry in shape.custom_data.iter().flatten() {
+                if !entry.key.trim().eq_ignore_ascii_case(field.trim()) {
+                    continue;
+                }
+                let value = entry.value.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                if !values.iter().any(|v| v.eq_ignore_ascii_case(value)) {
+                    values.push(value.to_string());
+                }
+            }
+        }
+
+        if values.is_empty() {
+            self.status = format!("No shape carries a {field}");
+            return 0;
+        }
+
+        // More categories than colours wraps rather than refusing; a repeated
+        // colour is better than leaving some shapes unmarked.
+        let rules: Vec<dc_model::FormatRule> = values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                let color = dc_model::CATEGORY_COLORS[i % dc_model::CATEGORY_COLORS.len()];
+                dc_model::FormatRule::fill_when(field, value, color)
+            })
+            .collect();
+
+        self.as_one_change(|e| {
+            e.package.document.format_rules = Some(rules);
+            let touched = e.apply_format_rules_inner();
+            e.status = format!(
+                "Coloured {touched} shape(s) by {field}: {} value(s)",
+                values.len()
+            );
+            touched
+        })
+    }
+
+    /// Runs the document's rules over the page.
+    ///
+    /// Later rules win, so a document can state a general rule and then an
+    /// exception after it.
+    pub fn apply_format_rules(&mut self) -> usize {
+        if self.format_rules().is_empty() {
+            self.status = "This document has no formatting rules".into();
+            return 0;
+        }
+        let touched = self.as_one_change(|e| e.apply_format_rules_inner());
+        self.status = format!("Applied formatting to {touched} shape(s)");
+        touched
+    }
+
+    /// The part that mutates, without recording history of its own.
+    fn apply_format_rules_inner(&mut self) -> usize {
+        let rules = match &self.package.document.format_rules {
+            Some(rules) if !rules.is_empty() => rules.clone(),
+            _ => return 0,
+        };
+
+        let mut changes: Vec<(String, dc_model::FormatRule)> = Vec::new();
+        for shape in self.page().shapes() {
+            if let Some(rule) = rules.iter().rev().find(|r| r.matches(shape)) {
+                changes.push((shape.id.clone(), rule.clone()));
+            }
+        }
+
+        let touched = changes.len();
+        for (id, rule) in changes {
+            let Some(shape) = self.page_mut().shape_mut(&id) else {
+                continue;
+            };
+            let style = shape.style.get_or_insert_with(Default::default);
+            if let Some(fill) = rule.fill {
+                style.fill = Some(dc_model::Fill::solid(fill));
+            }
+            if let Some(stroke) = rule.stroke {
+                let width = style.resolved_stroke().resolved_width();
+                style.stroke = Some(dc_model::Stroke::new(stroke, width));
+            }
+            if let Some(text) = rule.text_color {
+                style.text_color = Some(text);
+            }
+        }
+        if touched > 0 {
+            self.dirty = true;
+        }
+        touched
+    }
+
+    /// Forgets the rules, leaving the colours they produced in place.
+    ///
+    /// The colours are ordinary fills now, so clearing the rules is not an
+    /// undo — that is what undo is for.
+    pub fn clear_format_rules(&mut self) {
+        if self.format_rules().is_empty() {
+            return;
+        }
+        self.begin_change();
+        self.package.document.format_rules = None;
+        self.status = "Cleared the formatting rules".into();
     }
 
     // -------------------------------------------------------------- layers
@@ -4062,6 +4606,356 @@ mod tests {
     }
 
     #[test]
+    fn a_guide_is_placed_and_cleared() {
+        let mut e = editor_with_two_shapes();
+        e.add_guide(120.0, true);
+        e.add_guide(300.0, false);
+        assert_eq!(e.page_guides().len(), 2);
+
+        e.clear_guides();
+        assert!(e.page_guides().is_empty());
+    }
+
+    #[test]
+    fn a_guide_on_top_of_an_existing_one_is_not_added_twice() {
+        let mut e = editor_with_two_shapes();
+        e.add_guide(120.0, true);
+        e.add_guide(120.2, true);
+        assert_eq!(e.page_guides().len(), 1, "a near-duplicate is the same guide");
+
+        e.add_guide(120.0, false);
+        assert_eq!(e.page_guides().len(), 2, "but the other axis is a different one");
+    }
+
+    #[test]
+    fn a_guide_can_be_removed_by_pointing_near_it() {
+        let mut e = editor_with_two_shapes();
+        e.add_guide(120.0, true);
+
+        assert!(!e.remove_guide_near(200.0, true, 5.0), "too far to be meant");
+        assert!(e.remove_guide_near(122.0, true, 5.0), "near enough");
+        assert!(e.page_guides().is_empty());
+    }
+
+    #[test]
+    fn guides_from_the_selection_bracket_it() {
+        let mut e = editor_with_two_shapes();
+        let id = e.page().shapes()[0].id.clone();
+        e.selection = vec![id];
+        e.guides_from_selection();
+
+        // The fixture's first shape is at (100,100) 100×60.
+        let verticals: Vec<f64> = e
+            .page_guides()
+            .iter()
+            .filter(|g| g.vertical)
+            .map(|g| g.at)
+            .collect();
+        assert!(verticals.contains(&100.0), "left edge, got {verticals:?}");
+        assert!(verticals.contains(&150.0), "centre");
+        assert!(verticals.contains(&200.0), "right edge");
+    }
+
+    #[test]
+    fn guides_from_the_selection_are_one_undo_step() {
+        let mut e = editor_with_two_shapes();
+        e.selection = vec![e.page().shapes()[0].id.clone()];
+        e.guides_from_selection();
+        assert_eq!(e.page_guides().len(), 6);
+
+        e.undo();
+        assert!(e.page_guides().is_empty(), "all six went down together");
+    }
+
+    #[test]
+    fn a_drag_snaps_to_a_placed_guide() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        e.snap_enabled = false;
+        e.snap_to_grid = false;
+        let id = e.page().shapes()[0].id.clone();
+
+        // A guide a few units from where the drag would otherwise land.
+        e.add_guide(260.0, true);
+
+        e.pointer_down(Point::new(150.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(307.0, 130.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(307.0, 130.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(
+            e.page().shape(&id).unwrap().bounding_box.x,
+            260.0,
+            "the left edge should have taken the guide"
+        );
+    }
+
+    #[test]
+    fn guides_survive_a_round_trip_through_the_document() {
+        let mut e = editor_with_two_shapes();
+        e.add_guide(120.0, true);
+
+        let json = serde_json::to_string(&e.package.document).unwrap();
+        assert!(json.contains("dcGuides"), "written under its namespaced key");
+        let back: dc_model::Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pages[0].guides(), e.page().guides());
+    }
+
+    /// Three shapes joined a → b → c, deliberately scattered.
+    fn editor_with_a_chain() -> (Editor, Vec<String>) {
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        let a = e.create_shape(ShapeType::Rectangle, BoundingBox::new(400.0, 300.0, 100.0, 60.0));
+        let b = e.create_shape(ShapeType::Rectangle, BoundingBox::new(80.0, 500.0, 100.0, 60.0));
+        let c = e.create_shape(ShapeType::Rectangle, BoundingBox::new(600.0, 40.0, 100.0, 60.0));
+        for (from, to) in [(&a, &b), (&b, &c)] {
+            let id = e.package.document.fresh_id("line");
+            e.page_mut().add_line(Line::new(
+                &id,
+                Endpoint::at_shape(from.clone(), EndpointStyle::None),
+                Endpoint::at_shape(to.clone(), EndpointStyle::Arrow),
+            ));
+        }
+        e.selection.clear();
+        e.dirty = false;
+        e.history.clear();
+        (e, vec![a, b, c])
+    }
+
+    #[test]
+    fn tidying_orders_a_chain_down_the_page() {
+        let (mut e, ids) = editor_with_a_chain();
+        assert_eq!(e.tidy_layout(true), 3);
+
+        let y = |id: &str| e.page().shape(id).unwrap().bounding_box.y;
+        assert!(y(&ids[0]) < y(&ids[1]), "a should end up above b");
+        assert!(y(&ids[1]) < y(&ids[2]), "and b above c");
+    }
+
+    #[test]
+    fn tidying_horizontally_orders_a_chain_across() {
+        let (mut e, ids) = editor_with_a_chain();
+        e.tidy_layout(false);
+
+        let x = |id: &str| e.page().shape(id).unwrap().bounding_box.x;
+        assert!(x(&ids[0]) < x(&ids[1]));
+        assert!(x(&ids[1]) < x(&ids[2]));
+    }
+
+    #[test]
+    fn tidying_keeps_the_diagram_where_it_was() {
+        let (mut e, ids) = editor_with_a_chain();
+        let before = e.bounds_of(&ids).unwrap().center();
+        e.tidy_layout(true);
+        let after = e.bounds_of(&ids).unwrap().center();
+
+        assert!(
+            (before.x - after.x).abs() < 0.01 && (before.y - after.y).abs() < 0.01,
+            "the arrangement should stay centred where it was: {before:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn tidying_leaves_a_locked_shape_alone() {
+        let (mut e, ids) = editor_with_a_chain();
+        e.selection = vec![ids[1].clone()];
+        e.set_selection_locked(true);
+        e.clear_selection();
+        let pinned = e.page().shape(&ids[1]).unwrap().bounding_box;
+
+        e.tidy_layout(true);
+        assert_eq!(
+            e.page().shape(&ids[1]).unwrap().bounding_box,
+            pinned,
+            "a locked shape is excluded from the arrangement, not moved by it"
+        );
+    }
+
+    #[test]
+    fn tidying_acts_on_the_selection_when_there_is_one() {
+        let (mut e, ids) = editor_with_a_chain();
+        let untouched = e.page().shape(&ids[2]).unwrap().bounding_box;
+        e.selection = vec![ids[0].clone(), ids[1].clone()];
+
+        e.tidy_layout(true);
+        assert_eq!(
+            e.page().shape(&ids[2]).unwrap().bounding_box,
+            untouched,
+            "a shape outside the selection should not move"
+        );
+    }
+
+    #[test]
+    fn tidying_needs_two_shapes() {
+        let mut e = Editor::new();
+        e.resize_viewport(800.0, 600.0);
+        e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 10.0, 10.0));
+        assert_eq!(e.tidy_layout(true), 0);
+        assert!(e.status.contains("at least two"), "got {:?}", e.status);
+    }
+
+    #[test]
+    fn tidying_is_one_undo_step() {
+        let (mut e, ids) = editor_with_a_chain();
+        let before = e.page().shape(&ids[0]).unwrap().bounding_box;
+        e.tidy_layout(true);
+        assert_ne!(e.page().shape(&ids[0]).unwrap().bounding_box, before);
+
+        e.undo();
+        assert_eq!(e.page().shape(&ids[0]).unwrap().bounding_box, before);
+    }
+
+    #[test]
+    fn tidying_keeps_a_shapes_rotation() {
+        let (mut e, ids) = editor_with_a_chain();
+        if let Some(shape) = e.page_mut().shape_mut(&ids[0]) {
+            shape.bounding_box = shape.bounding_box.with_rotation(30.0);
+        }
+        e.tidy_layout(true);
+        assert_eq!(
+            e.page().shape(&ids[0]).unwrap().bounding_box.rotation_degrees(),
+            30.0,
+            "tidying decides where a shape sits, not which way it faces"
+        );
+    }
+
+    /// Three shapes carrying a `status`, two of them sharing a value.
+    fn editor_with_statuses() -> (Editor, Vec<String>) {
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        let mut ids = Vec::new();
+        for (i, status) in ["live", "draft", "live"].iter().enumerate() {
+            let id = e.create_shape(
+                ShapeType::Rectangle,
+                BoundingBox::new(i as f64 * 120.0, 0.0, 100.0, 60.0),
+            );
+            if let Some(shape) = e.page_mut().shape_mut(&id) {
+                shape.custom_data = Some(vec![dc_model::CustomDataEntry {
+                    key: "status".into(),
+                    value: status.to_string(),
+                }]);
+            }
+            ids.push(id);
+        }
+        e.selection.clear();
+        e.dirty = false;
+        e.history.clear();
+        (e, ids)
+    }
+
+    fn fill_of(e: &Editor, id: &str) -> Option<dc_model::Color> {
+        e.page().shape(id)?.resolved_style().resolved_fill().color()
+    }
+
+    #[test]
+    fn the_fields_offered_are_the_ones_the_page_carries() {
+        let (e, _) = editor_with_statuses();
+        assert_eq!(e.data_fields(), vec!["status"]);
+
+        let plain = editor_with_two_shapes();
+        assert!(plain.data_fields().is_empty(), "no data, nothing to offer");
+    }
+
+    #[test]
+    fn colouring_by_a_field_gives_each_value_its_own_colour() {
+        let (mut e, ids) = editor_with_statuses();
+        assert_eq!(e.color_by_field("status"), 3, "every shape should be coloured");
+
+        let live = fill_of(&e, &ids[0]).unwrap();
+        let draft = fill_of(&e, &ids[1]).unwrap();
+        let live_again = fill_of(&e, &ids[2]).unwrap();
+
+        assert_eq!(live, live_again, "the same value takes the same colour");
+        assert_ne!(live, draft, "a different value takes a different one");
+    }
+
+    #[test]
+    fn colouring_records_the_rules_that_produced_it() {
+        let (mut e, _) = editor_with_statuses();
+        e.color_by_field("status");
+
+        let rules = e.format_rules();
+        assert_eq!(rules.len(), 2, "one rule per distinct value");
+        assert!(rules.iter().all(|r| r.field == "status"));
+        assert!(rules.iter().any(|r| r.value == "live"));
+        assert!(rules.iter().any(|r| r.value == "draft"));
+    }
+
+    #[test]
+    fn colouring_by_an_absent_field_changes_nothing() {
+        let (mut e, ids) = editor_with_statuses();
+        let before = fill_of(&e, &ids[0]);
+        assert_eq!(e.color_by_field("owner"), 0);
+        assert_eq!(fill_of(&e, &ids[0]), before);
+        assert!(e.status.contains("owner"), "got {:?}", e.status);
+    }
+
+    #[test]
+    fn colouring_is_one_undo_step() {
+        let (mut e, ids) = editor_with_statuses();
+        let before = fill_of(&e, &ids[0]);
+        e.color_by_field("status");
+        assert_ne!(fill_of(&e, &ids[0]), before);
+
+        // Writing the rules and recolouring every shape was one gesture.
+        e.undo();
+        assert_eq!(fill_of(&e, &ids[0]), before);
+        assert!(e.format_rules().is_empty(), "the rules should go back too");
+    }
+
+    #[test]
+    fn a_later_rule_wins_over_an_earlier_one() {
+        let (mut e, ids) = editor_with_statuses();
+        let red = dc_model::Color::rgb(0xff, 0x00, 0x00);
+        let blue = dc_model::Color::rgb(0x00, 0x00, 0xff);
+        e.package.document.format_rules = Some(vec![
+            dc_model::FormatRule::fill_when("status", "live", red),
+            dc_model::FormatRule::fill_when("status", "live", blue),
+        ]);
+
+        e.apply_format_rules();
+        assert_eq!(
+            fill_of(&e, &ids[0]),
+            Some(blue),
+            "the exception stated last should win"
+        );
+    }
+
+    #[test]
+    fn applying_with_no_rules_says_so_and_changes_nothing() {
+        let (mut e, ids) = editor_with_statuses();
+        let before = fill_of(&e, &ids[0]);
+        assert_eq!(e.apply_format_rules(), 0);
+        assert_eq!(fill_of(&e, &ids[0]), before);
+        assert!(e.status.contains("no formatting rules"), "got {:?}", e.status);
+    }
+
+    #[test]
+    fn clearing_the_rules_leaves_the_colours_behind() {
+        let (mut e, ids) = editor_with_statuses();
+        e.color_by_field("status");
+        let coloured = fill_of(&e, &ids[0]);
+
+        e.clear_format_rules();
+        assert!(e.format_rules().is_empty());
+        assert_eq!(
+            fill_of(&e, &ids[0]),
+            coloured,
+            "the fills are ordinary fills now; undo is what takes them back"
+        );
+    }
+
+    #[test]
+    fn rules_survive_a_round_trip_through_the_document() {
+        let (mut e, _) = editor_with_statuses();
+        e.color_by_field("status");
+
+        let json = serde_json::to_string(&e.package.document).unwrap();
+        assert!(json.contains("dcFormatRules"), "written under its namespaced key");
+        let back: dc_model::Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.format_rules, e.package.document.format_rules);
+    }
+
+    #[test]
     fn a_data_source_is_read_from_the_package() {
         let (e, _, _) = editor_with_data();
         let sources = e.data_sources();
@@ -4182,6 +5076,170 @@ mod tests {
         let id = e.page().shapes()[0].id.clone();
         e.pointer_move(Point::new(150.0, 130.0), mods(), &mut tcx.ctx());
         (e, tcx, id)
+    }
+
+    #[test]
+    fn resizing_a_container_scales_what_is_inside_it() {
+        let mut tcx = TestCx::new();
+        let (mut e, container, child) = editor_with_a_container();
+        e.selection = vec![container.clone()];
+
+        // Drags the bottom-right handle out, doubling the container's width.
+        e.start_handle_drag(HandleKind::BottomRight, Point::new(400.0, 300.0));
+        e.pointer_move(Point::new(700.0, 300.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(700.0, 300.0), mods(), &mut tcx.ctx());
+
+        let grown = e.page().shape(&container).unwrap().bounding_box;
+        assert_eq!(grown.w, 600.0, "the container should have doubled");
+
+        let scaled = e.page().shape(&child).unwrap().bounding_box;
+        assert_eq!(scaled.w, 120.0, "the shape inside should scale with it");
+        assert_eq!(scaled.x, 200.0, "and keep its relative place");
+    }
+
+    #[test]
+    fn fitting_a_container_tightens_it_around_its_contents() {
+        let (mut e, container, child) = editor_with_a_container();
+        e.selection = vec![container.clone()];
+        e.fit_container_to_contents();
+
+        let fitted = e.page().shape(&container).unwrap().bounding_box;
+        let inside = e.page().shape(&child).unwrap().bounding_box;
+        assert_eq!(fitted.w, inside.w + CONTAINER_PADDING * 2.0);
+        assert_eq!(fitted.h, inside.h + CONTAINER_PADDING * 2.0);
+        assert_eq!(fitted.x, inside.x - CONTAINER_PADDING);
+    }
+
+    #[test]
+    fn fitting_an_empty_container_leaves_it_alone() {
+        let mut e = Editor::new();
+        e.resize_viewport(1000.0, 700.0);
+        let id = e.create_shape(
+            ShapeType::RectangleContainer,
+            BoundingBox::new(0.0, 0.0, 200.0, 100.0),
+        );
+        let before = e.page().shape(&id).unwrap().bounding_box;
+        e.selection = vec![id.clone()];
+
+        e.fit_container_to_contents();
+        assert_eq!(e.page().shape(&id).unwrap().bounding_box, before);
+        assert!(e.status.contains("empty"), "got {:?}", e.status);
+    }
+
+    #[test]
+    fn fitting_needs_a_container_selected() {
+        let mut e = editor_with_two_shapes();
+        e.selection = vec![e.page().shapes()[0].id.clone()];
+        e.fit_container_to_contents();
+        assert!(e.status.contains("Select a container"), "got {:?}", e.status);
+    }
+
+    #[test]
+    fn a_locked_shape_refuses_to_be_dragged() {
+        let mut tcx = TestCx::new();
+        let mut e = editor_with_two_shapes();
+        e.snap_enabled = false;
+        e.snap_to_grid = false;
+        let id = e.page().shapes()[0].id.clone();
+        e.selection = vec![id.clone()];
+        e.set_selection_locked(true);
+        let before = e.page().shape(&id).unwrap().bounding_box;
+
+        e.pointer_down(Point::new(150.0, 130.0), mods(), false, 1, &mut tcx.ctx());
+        e.pointer_move(Point::new(300.0, 200.0), mods(), &mut tcx.ctx());
+        e.pointer_up(Point::new(300.0, 200.0), mods(), &mut tcx.ctx());
+
+        assert_eq!(e.page().shape(&id).unwrap().bounding_box, before);
+        assert_eq!(
+            e.selection,
+            vec![id],
+            "it still selects, or there would be no way to unlock it"
+        );
+    }
+
+    #[test]
+    fn a_locked_shape_refuses_a_nudge_and_a_resize() {
+        let mut e = editor_with_two_shapes();
+        let id = e.page().shapes()[0].id.clone();
+        e.selection = vec![id.clone()];
+        e.set_selection_locked(true);
+        let before = e.page().shape(&id).unwrap().bounding_box;
+
+        e.nudge(10.0, 10.0);
+        assert_eq!(e.page().shape(&id).unwrap().bounding_box, before, "nudge");
+
+        // The resize path refuses before it starts, so the box is untouched.
+        e.start_handle_drag(HandleKind::BottomRight, Point::new(200.0, 160.0));
+        assert!(e.drag.is_none(), "no resize drag should begin");
+    }
+
+    #[test]
+    fn deleting_keeps_a_locked_shape_and_says_so() {
+        let mut e = editor_with_two_shapes();
+        let locked = e.page().shapes()[0].id.clone();
+        let other = e.page().shapes()[1].id.clone();
+        e.selection = vec![locked.clone()];
+        e.set_selection_locked(true);
+
+        e.selection = vec![locked.clone(), other.clone()];
+        e.delete_selection();
+
+        assert!(e.page().shape(&locked).is_some(), "the locked shape survives");
+        assert!(e.page().shape(&other).is_none(), "the unlocked one does not");
+        assert_eq!(e.selection, vec![locked], "and stays selected");
+    }
+
+    #[test]
+    fn deleting_only_locked_shapes_removes_nothing() {
+        let mut e = editor_with_two_shapes();
+        let id = e.page().shapes()[0].id.clone();
+        e.selection = vec![id.clone()];
+        e.set_selection_locked(true);
+        e.delete_selection();
+
+        assert!(e.page().shape(&id).is_some());
+        assert!(e.status.contains("locked"), "got {:?}", e.status);
+    }
+
+    #[test]
+    fn unlocking_clears_the_key_rather_than_writing_false() {
+        let mut e = editor_with_two_shapes();
+        let id = e.page().shapes()[0].id.clone();
+        e.selection = vec![id.clone()];
+
+        e.set_selection_locked(true);
+        assert_eq!(e.page().shape(&id).unwrap().locked, Some(true));
+
+        e.set_selection_locked(false);
+        assert_eq!(
+            e.page().shape(&id).unwrap().locked,
+            None,
+            "an unlocked shape should leave the file as it was"
+        );
+    }
+
+    #[test]
+    fn unlock_all_reaches_what_the_selection_cannot() {
+        let mut e = editor_with_two_shapes();
+        let ids: Vec<String> = e.page().shapes().iter().map(|s| s.id.clone()).collect();
+        e.selection = ids.clone();
+        e.set_selection_locked(true);
+        e.clear_selection();
+
+        e.unlock_all();
+        assert!(e.page().shapes().iter().all(|s| !s.is_locked()));
+    }
+
+    #[test]
+    fn locking_is_one_undo_step() {
+        let mut e = editor_with_two_shapes();
+        let id = e.page().shapes()[0].id.clone();
+        e.selection = vec![id.clone()];
+        e.set_selection_locked(true);
+        assert!(e.page().shape(&id).unwrap().is_locked());
+
+        e.undo();
+        assert!(!e.page().shape(&id).unwrap().is_locked());
     }
 
     #[test]

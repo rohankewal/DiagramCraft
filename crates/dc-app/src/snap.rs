@@ -82,6 +82,62 @@ pub fn snap_box(moving: BoundingBox, others: &[BoundingBox], threshold: f64) -> 
     result
 }
 
+/// Finds the nearest placed guide for `moving`.
+///
+/// Guides take priority over alignment with other shapes: an author who put
+/// a guide down said where they want things, which is more specific than the
+/// incidental fact that two shapes happen to line up.
+pub fn snap_box_to_guides(
+    moving: BoundingBox,
+    guides: &[dc_model::Guide],
+    threshold: f64,
+) -> SnapResult {
+    let mut result = SnapResult::default();
+    if threshold <= 0.0 || guides.is_empty() {
+        return result;
+    }
+
+    let mut best_x: Option<f64> = None;
+    let mut best_y: Option<f64> = None;
+
+    for guide in guides {
+        let (mine, best, delta) = if guide.vertical {
+            (x_edges(&moving), &mut best_x, &mut result.dx)
+        } else {
+            (y_edges(&moving), &mut best_y, &mut result.dy)
+        };
+        for edge in mine {
+            let d = guide.at - edge;
+            if d.abs() <= threshold && best.is_none_or(|b: f64| d.abs() < b) {
+                *best = Some(d.abs());
+                *delta = d;
+            }
+        }
+    }
+
+    for guide in guides {
+        let hit = if guide.vertical { best_x } else { best_y };
+        let delta = if guide.vertical { result.dx } else { result.dy };
+        if hit.is_some()
+            && x_edges(&moving)
+                .iter()
+                .chain(y_edges(&moving).iter())
+                .any(|e| ((e + delta) - guide.at).abs() < 1e-6)
+        {
+            result.guides.push(SnapGuide { at: guide.at, vertical: guide.vertical });
+        }
+    }
+    result.guides.dedup();
+
+    if best_x.is_none() {
+        result.dx = 0.0;
+    }
+    if best_y.is_none() {
+        result.dy = 0.0;
+    }
+    result
+}
+
 /// Rounds a value to the nearest multiple of `pitch`, for grid snapping.
 pub fn snap_to_grid(value: f64, pitch: f64) -> f64 {
     if pitch <= 0.0 {

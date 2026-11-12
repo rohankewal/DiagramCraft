@@ -102,6 +102,9 @@ pub struct Overlay<'a> {
     /// Rubber-band selection rectangle, in document units.
     pub marquee: Option<BoundingBox>,
     pub snap_guides: &'a [SnapGuide],
+    /// Guides the author placed, which stay on the page rather than
+    /// appearing only during a drag.
+    pub placed_guides: &'a [dc_model::Guide],
     /// A connector mid-draw, from its origin to the pointer.
     pub pending_connector: Option<(Point, Point)>,
     /// Connection points to offer on the shape being aimed at, in document
@@ -775,6 +778,22 @@ impl Renderer {
         overlay: &Overlay<'_>,
     ) {
         let ident = Affine::IDENTITY;
+
+        // Placed guides sit under the transient ones: a snap guide appearing
+        // over the guide it snapped to should be the visible one.
+        for guide in overlay.placed_guides {
+            let mut p = BezPath::new();
+            if guide.vertical {
+                let x = camera.doc_to_screen(Point::new(guide.at, 0.0)).x;
+                p.move_to((x, 0.0));
+                p.line_to((x, camera.viewport.y));
+            } else {
+                let y = camera.doc_to_screen(Point::new(0.0, guide.at)).y;
+                p.move_to((0.0, y));
+                p.line_to((camera.viewport.x, y));
+            }
+            scene.stroke(&KStroke::new(1.0), ident, px(self.theme.placed_guide), None, &p);
+        }
 
         for guide in overlay.snap_guides {
             let mut p = BezPath::new();

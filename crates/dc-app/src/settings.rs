@@ -48,6 +48,8 @@ pub struct Settings {
 
     // ------------------------------------------------------------ canvas
     pub show_page_bounds: bool,
+    /// Whether rulers are drawn along the top and left of the canvas.
+    pub show_rulers: bool,
     /// Zoom ratio applied per zoom step.
     pub zoom_step: f64,
 
@@ -78,6 +80,7 @@ impl Default for Settings {
             snap_to_grid: true,
             snap_distance: 6.0,
             show_page_bounds: true,
+            show_rulers: false,
             zoom_step: 1.25,
             default_line_type: LineType::Elbow,
             route_around_shapes: true,

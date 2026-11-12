@@ -96,6 +96,8 @@ pub struct App {
     /// A shape tile pressed but not yet resolved into a click or a drag onto
     /// the canvas.
     shape_tile_press: bool,
+    /// A guide being pulled off a ruler: true for a vertical one.
+    guide_drag: Option<bool>,
 
     /// Window size in logical pixels.
     window_size: Vec2,
@@ -171,6 +173,7 @@ impl App {
             tab_drag: None,
             tab_press: None,
             shape_tile_press: false,
+            guide_drag: None,
             window_size: Vec2::new(1440.0, 900.0),
             scale_factor: 1.0,
             pointer: kurbo::Point::ZERO,
@@ -479,6 +482,7 @@ impl App {
             self.document_renderer.text_engine(),
             self.hovered_region,
             &self.editor.status,
+            &self.editor.camera,
         );
 
         if editing_tab {
@@ -662,6 +666,19 @@ impl App {
         self.request_redraw();
     }
 
+    /// Which ruler the pointer is over, as whether it yields a vertical
+    /// guide. The top ruler runs across the page, so dragging from it gives
+    /// a vertical line, and the left ruler gives a horizontal one.
+    fn ruler_under_pointer(&self, chrome: &crate::ui::Chrome) -> Option<bool> {
+        if chrome.layout.ruler_top.is_some_and(|r| r.contains(self.pointer)) {
+            return Some(true);
+        }
+        if chrome.layout.ruler_left.is_some_and(|r| r.contains(self.pointer)) {
+            return Some(false);
+        }
+        None
+    }
+
     fn on_pointer_down(&mut self, button: MouseButton) {
         let chrome = self.chrome();
         self.shape_tile_press = false;
@@ -670,6 +687,18 @@ impl App {
             self.editor.commit_text_edit();
             self.open_menu = None;
             self.context_menu = None;
+
+            // Right-clicking a ruler takes the nearest guide off that axis,
+            // which is how one is removed once it has been placed.
+            if let Some(vertical) = self.ruler_under_pointer(&chrome) {
+                let local = self.canvas_point(self.pointer, &chrome);
+                let doc_point = self.editor.camera.screen_to_doc(local);
+                let at = if vertical { doc_point.x } else { doc_point.y };
+                let slop = self.editor.camera.screen_to_doc_scalar(6.0);
+                self.editor.remove_guide_near(at, vertical, slop);
+                self.request_redraw();
+                return;
+            }
 
             if let Some(index) = chrome.hit(self.pointer) {
                 // A page tab gets its own menu, for the page it names rather
@@ -846,6 +875,15 @@ impl App {
             }
         }
 
+        // A press on a ruler pulls a guide out of it, the way every drawing
+        // tool with rulers behaves. It is checked before the canvas because
+        // the strips sit outside the canvas rectangle.
+        if let Some(vertical) = self.ruler_under_pointer(&chrome) {
+            self.guide_drag = Some(vertical);
+            self.request_redraw();
+            return;
+        }
+
         if !chrome.layout.canvas.contains(self.pointer) {
             return;
         }
@@ -884,6 +922,20 @@ impl App {
         // A shape tile dropped over the canvas places the shape at its
         // default size, centered wherever the button came back up — a
         // drag-and-drop, not a box drawn out by the gesture's path.
+        // A guide is placed where the drag let go, and dropped if it never
+        // left the ruler it came from.
+        if let Some(vertical) = self.guide_drag.take() {
+            let chrome = self.chrome();
+            if chrome.layout.canvas.contains(self.pointer) {
+                let local = self.canvas_point(self.pointer, &chrome);
+                let doc_point = self.editor.camera.screen_to_doc(local);
+                let at = if vertical { doc_point.x } else { doc_point.y };
+                self.editor.add_guide(at, vertical);
+            }
+            self.request_redraw();
+            return;
+        }
+
         if self.shape_tile_press {
             self.shape_tile_press = false;
             let chrome = self.chrome();
@@ -1576,6 +1628,22 @@ impl App {
             UiAction::Align(how) => self.editor.align_selection(how),
             UiAction::Distribute(horizontal) => self.editor.distribute_selection(horizontal),
             UiAction::MatchSize(w, h) => self.editor.match_size(w, h),
+            UiAction::SetLocked(locked) => self.editor.set_selection_locked(locked),
+            UiAction::UnlockAll => self.editor.unlock_all(),
+            UiAction::TidyLayout(vertical) => {
+                self.editor.tidy_layout(vertical);
+            }
+            UiAction::FitContainer => self.editor.fit_container_to_contents(),
+            UiAction::ClearGuides => self.editor.clear_guides(),
+            UiAction::GuidesFromSelection => self.editor.guides_from_selection(),
+            UiAction::ColorByField(field) => {
+                self.editor.color_by_field(&field);
+            }
+            UiAction::ApplyFormatRules => {
+                self.editor.apply_format_rules();
+            }
+            UiAction::ClearFormatRules => self.editor.clear_format_rules(),
+
             UiAction::Group => self.editor.group_selection(),
             UiAction::Ungroup => self.editor.ungroup_selection(),
 

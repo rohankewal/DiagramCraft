@@ -144,6 +144,15 @@ pub enum UiAction {
     Distribute(bool),
     MatchSize(bool, bool),
     Group,
+    SetLocked(bool),
+    UnlockAll,
+    FitContainer,
+    ClearGuides,
+    GuidesFromSelection,
+    TidyLayout(bool),
+    ColorByField(String),
+    ApplyFormatRules,
+    ClearFormatRules,
     Ungroup,
 
     // View
@@ -191,6 +200,7 @@ pub enum SettingChange {
     SnapToGrid(bool),
     SnapDistance(f64),
     ShowPageBounds(bool),
+    ShowRulers(bool),
     RouteAroundShapes(bool),
     DefaultLineType(LineType),
     ZoomStep(f64),
@@ -211,6 +221,7 @@ impl SettingChange {
             SettingChange::SnapToGrid(on) => settings.snap_to_grid = *on,
             SettingChange::SnapDistance(v) => settings.snap_distance = *v,
             SettingChange::ShowPageBounds(on) => settings.show_page_bounds = *on,
+            SettingChange::ShowRulers(on) => settings.show_rulers = *on,
             SettingChange::RouteAroundShapes(on) => settings.route_around_shapes = *on,
             SettingChange::DefaultLineType(t) => settings.default_line_type = *t,
             SettingChange::ZoomStep(v) => settings.zoom_step = *v,
@@ -398,6 +409,23 @@ impl Region {
     }
 }
 
+/// The distance between labelled ruler ticks, in document units.
+///
+/// Chosen from a 1-2-5 sequence so the number on a label stays round, and so
+/// that zooming changes the interval in steps a reader can follow rather
+/// than sliding continuously.
+pub fn ruler_step(zoom: f64) -> f64 {
+    // Aim for a label roughly every 80 screen pixels.
+    let target = 80.0 / zoom.max(1e-6);
+    let magnitude = 10f64.powf(target.max(1e-9).log10().floor());
+    for multiple in [1.0, 2.0, 5.0] {
+        if magnitude * multiple >= target {
+            return magnitude * multiple;
+        }
+    }
+    magnitude * 10.0
+}
+
 /// Panel rectangles for the current window size.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
@@ -408,10 +436,19 @@ pub struct Layout {
     /// The drawing area. Pointer coordinates must be made relative to this.
     pub canvas: Rect,
     pub tabs: Rect,
+    /// The ruler along the top of the canvas, when rulers are shown.
+    pub ruler_top: Option<Rect>,
+    /// The ruler down the left of the canvas, when rulers are shown.
+    pub ruler_left: Option<Rect>,
 }
 
 impl Layout {
-    pub fn compute(viewport: Vec2, metrics: &Metrics) -> Self {
+    /// Lays the window out, reserving space for the rulers when they are on.
+    ///
+    /// The rulers take their strip out of the canvas rather than overlaying
+    /// it, so nothing is ever drawn underneath them and the camera's
+    /// viewport stays exactly the area that can be drawn on.
+    pub fn compute_with_rulers(viewport: Vec2, metrics: &Metrics, rulers: bool) -> Self {
         let w = viewport.x.max(1.0);
         let h = viewport.y.max(1.0);
 
@@ -427,9 +464,25 @@ impl Layout {
 
         let left_panel = Rect::new(0.0, body_top, left_width, body_bottom);
         let right_panel = Rect::new(w - right_width, body_top, w, body_bottom);
-        let canvas = Rect::new(left_panel.x1, body_top, right_panel.x0, body_bottom);
+        let full = Rect::new(left_panel.x1, body_top, right_panel.x0, body_bottom);
 
-        Layout { viewport, menubar, left_panel, right_panel, canvas, tabs }
+        let (canvas, ruler_top, ruler_left) = if rulers {
+            let t = metrics.ruler_thickness;
+            // Too small to be worth losing the drawing area over.
+            if full.width() <= t * 2.0 || full.height() <= t * 2.0 {
+                (full, None, None)
+            } else {
+                (
+                    Rect::new(full.x0 + t, full.y0 + t, full.x1, full.y1),
+                    Some(Rect::new(full.x0 + t, full.y0, full.x1, full.y0 + t)),
+                    Some(Rect::new(full.x0, full.y0 + t, full.x0 + t, full.y1)),
+                )
+            }
+        } else {
+            (full, None, None)
+        };
+
+        Layout { viewport, menubar, left_panel, right_panel, canvas, tabs, ruler_top, ruler_left }
     }
 
     pub fn canvas_size(&self) -> Vec2 {
@@ -545,7 +598,7 @@ impl Chrome {
         tab_drag: Option<TabDrag>,
         context_menu: Option<(ContextTarget, kurbo::Point)>,
     ) -> Chrome {
-        let layout = Layout::compute(window, metrics);
+        let layout = Layout::compute_with_rulers(window, metrics, view.settings.show_rulers);
         let mut regions = Vec::new();
         let menus = menu::menus(editor, view);
 
@@ -682,6 +735,7 @@ impl Chrome {
         text: &mut TextEngine,
         hovered: Option<usize>,
         status: &str,
+        camera: &dc_render::Camera,
     ) {
         let l = &self.layout;
 
@@ -700,6 +754,8 @@ impl Chrome {
             scene.fill(FillRule::NonZero, Affine::IDENTITY, px(divider), None, &edge);
         }
 
+        self.draw_rulers(scene, theme, text, camera);
+
         for (i, region) in self.regions.iter().enumerate() {
             let is_hovered = hovered == Some(i);
             self.draw_region(scene, theme, metrics, text, region, is_hovered);
@@ -714,6 +770,79 @@ impl Chrome {
                 l.tabs.x1 - 8.0,
                 l.tabs.y1,
             );
+            dc_render::text::draw(scene, &block, area, Affine::IDENTITY);
+        }
+    }
+
+    /// Paints the rulers, when they are shown.
+    ///
+    /// Ticks are chosen so the labelled interval stays a round number as the
+    /// zoom changes: at a distance the labels thin out rather than crowding
+    /// into an unreadable line.
+    fn draw_rulers(
+        &self,
+        scene: &mut Scene,
+        theme: &Theme,
+        text: &mut TextEngine,
+        camera: &dc_render::Camera,
+    ) {
+        let (Some(top), Some(left)) = (self.layout.ruler_top, self.layout.ruler_left) else {
+            return;
+        };
+        let canvas = self.layout.canvas;
+
+        for strip in [top, left] {
+            scene.fill(FillRule::NonZero, Affine::IDENTITY, px(theme.panel), None, &strip);
+        }
+        // The corner where the two meet, which belongs to neither.
+        let corner = Rect::new(left.x0, top.y0, left.x1, top.y1);
+        scene.fill(FillRule::NonZero, Affine::IDENTITY, px(theme.panel), None, &corner);
+
+        for edge in [
+            Rect::new(top.x0, top.y1 - 1.0, top.x1, top.y1),
+            Rect::new(left.x1 - 1.0, left.y0, left.x1, left.y1),
+        ] {
+            scene.fill(FillRule::NonZero, Affine::IDENTITY, px(theme.panel_border), None, &edge);
+        }
+
+        let step = ruler_step(camera.zoom);
+        let style = label_style(theme.text_muted, 8.0);
+
+        // Horizontal ruler. Canvas-relative screen coordinates are offset by
+        // the canvas origin, because the rulers are drawn in window space.
+        let first =
+            (camera.screen_to_doc(dc_model::Point::new(0.0, 0.0)).x / step).floor() as i64;
+        let last = (camera.screen_to_doc(dc_model::Point::new(canvas.width(), 0.0)).x / step)
+            .ceil() as i64;
+        for i in first..=last {
+            let at = i as f64 * step;
+            let x = canvas.x0 + camera.doc_to_screen(dc_model::Point::new(at, 0.0)).x;
+            if x < top.x0 || x > top.x1 {
+                continue;
+            }
+            let tick = Rect::new(x, top.y1 - 5.0, x + 1.0, top.y1);
+            scene.fill(FillRule::NonZero, Affine::IDENTITY, px(theme.text_muted), None, &tick);
+
+            let block = text.layout_plain(&format!("{at:.0}"), &style, None);
+            let area = Rect::new(x + 2.0, top.y0 + 1.0, x + 2.0 + block.width(), top.y1);
+            dc_render::text::draw(scene, &block, area, Affine::IDENTITY);
+        }
+
+        // Vertical ruler.
+        let first = (camera.screen_to_doc(dc_model::Point::new(0.0, 0.0)).y / step).floor() as i64;
+        let last = (camera.screen_to_doc(dc_model::Point::new(0.0, canvas.height())).y / step)
+            .ceil() as i64;
+        for i in first..=last {
+            let at = i as f64 * step;
+            let y = canvas.y0 + camera.doc_to_screen(dc_model::Point::new(0.0, at)).y;
+            if y < left.y0 || y > left.y1 {
+                continue;
+            }
+            let tick = Rect::new(left.x1 - 5.0, y, left.x1, y + 1.0);
+            scene.fill(FillRule::NonZero, Affine::IDENTITY, px(theme.text_muted), None, &tick);
+
+            let block = text.layout_plain(&format!("{at:.0}"), &style, None);
+            let area = Rect::new(left.x0 + 1.0, y + 1.0, left.x1, y + 1.0 + block.height());
             dc_render::text::draw(scene, &block, area, Affine::IDENTITY);
         }
     }
@@ -3290,7 +3419,7 @@ mod tests {
 
     #[test]
     fn layout_partitions_the_window_without_overlap() {
-        let l = Layout::compute(window(), &Metrics::default());
+        let l = Layout::compute_with_rulers(window(), &Metrics::default(), false);
 
         assert!(l.canvas.x0 >= l.left_panel.x1 - 0.01);
         assert!(l.canvas.x1 <= l.right_panel.x0 + 0.01);
@@ -3301,7 +3430,7 @@ mod tests {
 
     #[test]
     fn layout_survives_a_tiny_window() {
-        let l = Layout::compute(Vec2::new(60.0, 40.0), &Metrics::default());
+        let l = Layout::compute_with_rulers(Vec2::new(60.0, 40.0), &Metrics::default(), false);
         assert!(l.canvas.width() >= 0.0);
         assert!(l.canvas.height() >= 0.0);
         assert!(l.menubar.height() <= 40.0);
@@ -3309,7 +3438,7 @@ mod tests {
 
     #[test]
     fn panels_do_not_consume_the_whole_window() {
-        let l = Layout::compute(Vec2::new(400.0, 400.0), &Metrics::default());
+        let l = Layout::compute_with_rulers(Vec2::new(400.0, 400.0), &Metrics::default(), false);
         assert!(
             l.canvas.width() > 100.0,
             "canvas collapsed to {}",
@@ -4706,6 +4835,7 @@ mod tests {
             &mut text,
             None,
             "Ready",
+            &dc_render::Camera::default(),
         );
         assert!(scene.encoding().n_paths > 10, "chrome did not encode");
     }
@@ -4716,7 +4846,7 @@ mod tests {
         let mut text = TextEngine::new();
 
         let mut closed = Scene::new();
-        chrome(&e).draw(&mut closed, &Theme::light(), &Metrics::default(), &mut text, None, "");
+        chrome(&e).draw(&mut closed, &Theme::light(), &Metrics::default(), &mut text, None, "", &dc_render::Camera::default());
 
         let mut open = Scene::new();
         chrome_with_menu(&e, 0).draw(
@@ -4726,6 +4856,7 @@ mod tests {
             &mut text,
             None,
             "",
+            &dc_render::Camera::default(),
         );
 
         assert!(
@@ -4741,10 +4872,10 @@ mod tests {
         let mut text = TextEngine::new();
 
         let mut plain = Scene::new();
-        c.draw(&mut plain, &Theme::light(), &Metrics::default(), &mut text, None, "");
+        c.draw(&mut plain, &Theme::light(), &Metrics::default(), &mut text, None, "", &dc_render::Camera::default());
 
         let mut hovered = Scene::new();
-        c.draw(&mut hovered, &Theme::light(), &Metrics::default(), &mut text, Some(0), "");
+        c.draw(&mut hovered, &Theme::light(), &Metrics::default(), &mut text, Some(0), "", &dc_render::Camera::default());
 
         assert_ne!(
             hovered.encoding().draw_data,
@@ -4759,7 +4890,7 @@ mod tests {
         let c = chrome_with_menu(&e, 4);
         let mut scene = Scene::new();
         let mut text = TextEngine::new();
-        c.draw(&mut scene, &Theme::dark(), &Metrics::default(), &mut text, None, "x");
+        c.draw(&mut scene, &Theme::dark(), &Metrics::default(), &mut text, None, "x", &dc_render::Camera::default());
         assert!(scene.encoding().n_paths > 10);
     }
 
@@ -4776,6 +4907,7 @@ mod tests {
                 &mut text,
                 None,
                 "",
+                &dc_render::Camera::default(),
             );
             assert!(
                 scene.encoding().n_paths > 10,
@@ -5070,6 +5202,7 @@ mod tests {
                 &mut text,
                 None,
                 "",
+                &dc_render::Camera::default(),
             );
             assert!(scene.encoding().n_paths > 20, "the sheet did not draw");
         }
@@ -5081,7 +5214,7 @@ mod tests {
         let mut text = TextEngine::new();
 
         let mut closed = Scene::new();
-        chrome(&e).draw(&mut closed, &Theme::light(), &Metrics::default(), &mut text, None, "");
+        chrome(&e).draw(&mut closed, &Theme::light(), &Metrics::default(), &mut text, None, "", &dc_render::Camera::default());
 
         let mut open = Scene::new();
         settings_chrome(&e).draw(
@@ -5091,6 +5224,7 @@ mod tests {
             &mut text,
             None,
             "",
+            &dc_render::Camera::default(),
         );
 
         assert!(open.encoding().n_paths > closed.encoding().n_paths);
