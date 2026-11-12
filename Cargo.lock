@@ -663,6 +663,7 @@ name = "dc-app"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "dc-export",
  "dc-geom",
  "dc-lucid",
  "dc-model",
@@ -688,6 +689,18 @@ dependencies = [
  "wgpu",
  "winit",
  "zip",
+]
+
+[[package]]
+name = "dc-export"
+version = "0.1.0"
+dependencies = [
+ "dc-geom",
+ "dc-model",
+ "dc-render",
+ "kurbo",
+ "parley",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

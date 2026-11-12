@@ -41,6 +41,11 @@ pub enum UiAction {
     Save,
     SaveAs,
     ExportPng,
+    /// Export to a vector format. Both share a handler because they differ
+    /// only in which writer runs and what the dialog is named.
+    ExportVector {
+        pdf: bool,
+    },
     SetPageSize(String),
     ToggleInfiniteCanvas,
     Quit,

@@ -17,6 +17,7 @@ dc-lucid = { workspace = true }
 dc-vsdx = { workspace = true }
 dc-geom = { workspace = true }
 dc-render = { workspace = true }
+dc-export = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 parley = "0.12"

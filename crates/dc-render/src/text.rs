@@ -42,10 +42,94 @@ fn family_stack(name: &str) -> Vec<FontFamilyName<'_>> {
     ]
 }
 
+/// One run of laid-out text, placed at its own baseline.
+///
+/// A run never crosses a line break or a change of style, which makes it the
+/// unit a vector export can emit as real, selectable text rather than as
+/// outlines. The styling is recovered from the markup that was laid out, not
+/// guessed back out of the shaped glyphs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PositionedRun {
+    pub text: String,
+    /// Left edge of the run, on its baseline, in document units.
+    pub x: f64,
+    pub y: f64,
+    pub font_family: String,
+    pub size_pt: f64,
+    pub color: dc_model::Color,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// Advance width, which is what a rule under or through the run spans.
+    pub advance: f64,
+}
+
 /// Text laid out and ready to paint.
 pub struct TextBlock {
     layout: Layout<Brush>,
     vertical_align: VerticalAlign,
+    /// The flattened text the layout was built from, so a run's byte range
+    /// can be turned back into the characters it covers.
+    source: String,
+    /// The styled runs the markup parsed into, keyed by byte offset into
+    /// `source`. A glyph run's range falls inside exactly one of these.
+    styles: Vec<(std::ops::Range<usize>, TextStyle)>,
+}
+
+impl TextBlock {
+    /// The laid-out runs, positioned within `rect`.
+    ///
+    /// Vertical placement matches what [`draw`] paints, including the clamp
+    /// that pins overflowing text to the top, so an export and the canvas
+    /// agree on where every line sits.
+    pub fn runs(&self, rect: Rect) -> Vec<PositionedRun> {
+        let dy = vertical_offset(self.height(), rect.height(), self.vertical_align);
+        let mut out = Vec::new();
+
+        for line in self.layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                let range = glyph_run.run().text_range();
+                let Some(text) = self.source.get(range.clone()) else {
+                    continue;
+                };
+                // Trailing spaces at a line break carry no ink and would
+                // widen a selection box for nothing.
+                if text.trim().is_empty() {
+                    continue;
+                }
+
+                let style = self.style_at(range.start);
+                out.push(PositionedRun {
+                    text: text.to_string(),
+                    x: rect.x0 + glyph_run.offset() as f64,
+                    y: rect.y0 + dy + glyph_run.baseline() as f64,
+                    font_family: style.font_family.clone(),
+                    size_pt: style.font_size_pt,
+                    color: style.color,
+                    bold: style.bold,
+                    italic: style.italic,
+                    underline: style.underline,
+                    strikethrough: style.strikethrough,
+                    advance: glyph_run.advance() as f64,
+                });
+            }
+        }
+        out
+    }
+
+    /// The markup style covering a byte offset.
+    fn style_at(&self, offset: usize) -> TextStyle {
+        self.styles
+            .iter()
+            .find(|(range, _)| range.contains(&offset))
+            .map(|(_, style)| style.clone())
+            .or_else(|| self.styles.first().map(|(_, s)| s.clone()))
+            .unwrap_or_default()
+    }
 }
 
 impl TextBlock {
@@ -128,6 +212,9 @@ impl TextEngine {
         builder.push_default(StyleProperty::OverflowWrap(OverflowWrap::BreakWord));
 
         // Per-run styling, keyed by byte ranges into the flattened text.
+        // The same ranges are kept on the block so an export can recover a
+        // run's styling instead of inferring it from shaped glyphs.
+        let mut styles: Vec<(std::ops::Range<usize>, TextStyle)> = Vec::new();
         let mut offset = 0usize;
         let mut stacks: Vec<Vec<FontFamilyName<'_>>> = Vec::with_capacity(parsed.runs.len());
         for run in &parsed.runs {
@@ -139,6 +226,7 @@ impl TextEngine {
                 continue;
             }
             let range = offset..end;
+            styles.push((range.clone(), run.style.clone()));
 
             builder.push(StyleProperty::FontFamily(stack.as_slice().into()), range.clone());
             builder.push(
@@ -171,7 +259,12 @@ impl TextEngine {
             AlignmentOptions::default(),
         );
 
-        TextBlock { layout, vertical_align: parsed.vertical_align }
+        TextBlock {
+            layout,
+            vertical_align: parsed.vertical_align,
+            source: text,
+            styles,
+        }
     }
 
     /// Convenience for a single-style string.

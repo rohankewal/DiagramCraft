@@ -32,7 +32,8 @@ DiagramCraft — open-source diagramming in pure Rust
 
 USAGE:
     diagramcraft [FILE.lucid | FILE.vsdx]
-    diagramcraft export <IN.lucid> <OUT.png> [SCALE]
+    diagramcraft export <IN.lucid> <OUT.png|OUT.svg|OUT.pdf> [SCALE]
+                                              [--transparent]
     diagramcraft import <IN.vsdx> <OUT.lucid>
     diagramcraft icon <OUT.png> [SIZE]
     diagramcraft demo <OUT.lucid>
@@ -108,15 +109,46 @@ fn run_export(args: &[String]) -> ExitCode {
         }
     };
 
-    match export::render_png(&package, 0, scale, Path::new(output)) {
-        Ok((w, h)) => {
-            println!("wrote {output} ({w}x{h})");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("diagramcraft: export failed: {e}");
-            ExitCode::FAILURE
-        }
+    // The output extension picks the format: the vector ones take no scale,
+    // since there is no resolution to choose.
+    let transparent = args.iter().any(|a| a == "--transparent");
+    let options = dc_export::Options { transparent };
+    let extension = Path::new(output)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    match extension.as_str() {
+        "svg" => match dc_export::write_svg(&package.document, 0, options, Path::new(output)) {
+            Ok(()) => {
+                println!("wrote {output}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("diagramcraft: export failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "pdf" => match dc_export::write_pdf(&package.document, 0, options, Path::new(output)) {
+            Ok(()) => {
+                println!("wrote {output}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("diagramcraft: export failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => match export::render_png(&package, 0, scale, Path::new(output)) {
+            Ok((w, h)) => {
+                println!("wrote {output} ({w}x{h})");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("diagramcraft: export failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 

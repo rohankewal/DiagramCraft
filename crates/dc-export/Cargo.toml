@@ -1,0 +1,18 @@
+[package]
+name = "dc-export"
+description = "Vector export backends: SVG and PDF"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dc-model = { workspace = true }
+dc-geom = { workspace = true }
+# For text: export lays out with the same engine the canvas does, so a line
+# breaks in a file exactly where it breaks on screen.
+dc-render = { workspace = true }
+kurbo = { workspace = true }
+parley = "0.12"
+thiserror = { workspace = true }

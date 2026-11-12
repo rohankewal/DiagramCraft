@@ -248,6 +248,8 @@ fn file_menu(editor: &Editor) -> Menu {
             MenuItem::new("Save As…", "Shift ⌘S", UiAction::SaveAs),
             MenuItem::separator(),
             MenuItem::new("Export as PNG…", "Shift ⌘E", UiAction::ExportPng),
+            MenuItem::new("Export as SVG…", "", UiAction::ExportVector { pdf: false }),
+            MenuItem::new("Export as PDF…", "", UiAction::ExportVector { pdf: true }),
             MenuItem::separator(),
             // Lucidchart keeps page setup under File, and so does this.
             named("Page size: Letter", "letter"),

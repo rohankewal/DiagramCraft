@@ -75,6 +75,9 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - CSV data linking: match shape labels against a column of a bundled data
   source and the row's columns land in the shape's data panel
 - PNG export, headless and scriptable
+- SVG and PDF export, as real vectors with real text: labels stay selectable
+  and searchable, and a PDF embeds no font because the families the editor
+  offers are the ones every reader already has
 - Light and dark themes
 - Graph, line, and dot grids
 
@@ -106,6 +109,8 @@ diagramcraft                                  # open the editor
 diagramcraft diagram.lucid                    # open a document
 diagramcraft drawing.vsdx                     # import a Visio drawing
 diagramcraft export in.lucid out.png 2        # render to PNG at 2x
+diagramcraft export in.lucid out.svg          # ...or to vector SVG
+diagramcraft export in.lucid out.pdf          # ...or to PDF
 diagramcraft import in.vsdx out.lucid         # convert Visio, headlessly
 diagramcraft preview in.lucid shot.png        # screenshot the editor itself
 diagramcraft preview in.lucid shot.png --hover   # ...with the connect arrows out
@@ -194,7 +199,7 @@ diagramcraft icon out.png 512  # or one size, anywhere
 
 ## Architecture
 
-Six crates, each independently testable:
+Seven crates, each independently testable:
 
 | Crate | Responsibility |
 |---|---|
@@ -203,6 +208,7 @@ Six crates, each independently testable:
 | `dc-vsdx` | Visio `.vsdx` import: OPC container, XML parts, coordinates. |
 | `dc-geom` | Shape outlines, connector routing, endpoint markers. Pure geometry. |
 | `dc-render` | Vello scene construction, camera, theme, text. No GPU ownership. |
+| `dc-export` | SVG and PDF writers over one shared traversal. No GPU. |
 | `dc-app` | Window, event loop, editor state, undo, menus, settings, chrome. |
 
 The renderer builds scenes without owning a GPU device, so the entire render
@@ -211,7 +217,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 967 tests
+cargo test --workspace     # 996 tests
 ```
 
 ## Scope
@@ -249,6 +255,14 @@ Known limits:
   sizes, clicking into it can land a character off. The painted text is always
   the real, mixed-style layout.
 - **`.vsdx` export.** Import only; DiagramCraft writes `.lucid`.
+- **Images in vector exports.** A shape with an image fill exports as a flat
+  placeholder rather than the picture; SVG and PDF embedding of bitmaps is
+  not implemented.
+- **Non-Latin text in PDF.** Standard fonts are reached through
+  `WinAnsiEncoding`, so a character outside Latin-1 — CJK, or an emoji —
+  exports as `?`. Writing it as real text would mean embedding a font with a
+  CID mapping, which is the cost the base fonts exist to avoid. SVG has no
+  such limit.
 - **Real-time collaboration and comments.** Out of scope.
 
 ## Compatibility

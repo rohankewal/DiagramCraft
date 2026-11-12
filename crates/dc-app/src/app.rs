@@ -1409,6 +1409,28 @@ impl App {
                 }
             }
 
+            UiAction::ExportVector { pdf } => {
+                let (label, extension) = if pdf { ("PDF", "pdf") } else { ("SVG", "svg") };
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(&format!("{label} document"), &[extension])
+                    .set_file_name(&format!("diagram.{extension}"))
+                    .save_file()
+                {
+                    let page = self.editor.page_index;
+                    let document = &self.editor.package.document;
+                    let options = dc_export::Options::default();
+                    let written = if pdf {
+                        dc_export::write_pdf(document, page, options, &path)
+                    } else {
+                        dc_export::write_svg(document, page, options, &path)
+                    };
+                    self.editor.status = match written {
+                        Ok(()) => format!("Exported {label}"),
+                        Err(e) => format!("Could not export: {e}"),
+                    };
+                }
+            }
+
             UiAction::InsertImage => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp"])
