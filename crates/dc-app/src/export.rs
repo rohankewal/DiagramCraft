@@ -122,6 +122,7 @@ pub fn render_editor_png(
     open_menu: Option<usize>,
     settings_open: bool,
     rulers: bool,
+    presenting: bool,
     path: impl AsRef<Path>,
 ) -> Result<(u32, u32), Error> {
     use crate::menu::ViewState;
@@ -137,6 +138,7 @@ pub fn render_editor_png(
         },
         library,
         settings_open,
+        presenting,
         ..Default::default()
     };
     let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None, None);
@@ -144,9 +146,20 @@ pub fn render_editor_png(
     editor.resize_viewport(canvas.width(), canvas.height());
     // Rebuild so the chrome reflects the camera that was just sized.
     let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None, None);
+    // Presenting frames the page only once the canvas is the whole window.
+    if presenting {
+        editor.zoom_to_fit();
+    }
 
     let mut renderer = Renderer::new();
     renderer.theme = if dark { Theme::dark() } else { Theme::light() };
+    // A slide is the drawing and nothing else, so the graph paper and the
+    // sheet outline go away — matching what the editor does when it starts
+    // presenting, so this preview shows what is really on screen.
+    if presenting {
+        renderer.options.show_grid = false;
+        renderer.options.show_page_bounds = false;
+    }
     renderer.images.load(
         editor
             .package

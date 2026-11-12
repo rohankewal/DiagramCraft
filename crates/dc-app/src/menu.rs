@@ -63,6 +63,8 @@ pub struct ViewState {
     pub favorites: Vec<ShapeType>,
     /// Names of the templates they saved, shown under the built-in ones.
     pub saved_templates: Vec<String>,
+    /// Whether the editor is presenting, which hides every panel.
+    pub presenting: bool,
 }
 
 /// The key a menu item's shortcut names.
@@ -255,6 +257,7 @@ fn file_menu(editor: &Editor) -> Menu {
             MenuItem::new("Export as PNG…", "Shift ⌘E", UiAction::ExportPng),
             MenuItem::new("Export as SVG…", "", UiAction::ExportVector { pdf: false }),
             MenuItem::new("Export as PDF…", "", UiAction::ExportVector { pdf: true }),
+            MenuItem::new("Export as Visio…", "", UiAction::ExportVisio),
             MenuItem::separator(),
             // Lucidchart keeps page setup under File, and so does this.
             named("Page size: Letter", "letter"),
@@ -348,6 +351,11 @@ fn insert_menu(editor: &Editor, view: &ViewState) -> Menu {
             .enabled_when(editor.document().pages.len() > 1),
         MenuItem::separator(),
     ];
+
+    items.push(MenuItem::new("Link CSV File…", "", UiAction::LinkExternalData));
+    if !editor.data_links().is_empty() {
+        items.push(MenuItem::new("Refresh Data", "", UiAction::RefreshDataLinks));
+    }
 
     // One item per CSV the package carries, naming the column the link
     // matches on. A document with no data directory shows nothing here
@@ -548,6 +556,9 @@ fn view_menu(editor: &Editor, view: &ViewState) -> Menu {
             MenuItem::new("Zoom to Selection", "", UiAction::ZoomToSelection)
                 .enabled_when(!editor.selection.is_empty()),
             MenuItem::new("Actual Size", "⌘0", UiAction::ActualSize),
+            MenuItem::separator(),
+            MenuItem::new("Start Presentation", "", UiAction::StartPresenting)
+                .enabled_when(!view.presenting),
             MenuItem::separator(),
             MenuItem::check("Show Grid", "", UiAction::ToggleGrid, view.settings.show_grid),
             MenuItem::check("Show Page Bounds", "", UiAction::TogglePageBounds, view.settings.show_page_bounds),

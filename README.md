@@ -44,6 +44,8 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - Lock a shape in place — it still selects, so it can be unlocked, but it
   refuses to move, resize, or be deleted
 - Rulers, and guides dragged off them that shapes snap to
+- Presentation mode: pages full-screen with the chrome gone, arrow keys or
+  a clicker to step through
 
 **Text**
 - Edit labels in place: double-click a shape or connector, or press Enter
@@ -86,10 +88,12 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 
 **Files**
 - `.lucid` read and write, lossless for fields this build does not interpret
-- `.vsdx` import: Visio pages, shapes, text, styling, and connectors
+- `.vsdx` import and export: Visio pages, shapes, text, styling, and
+  connectors, with every outline written as real Visio geometry
 - Bundled images decoded and drawn, clipped to any shape outline
 - CSV data linking: match shape labels against a column of a bundled data
-  source and the row's columns land in the shape's data panel
+  source and the row's columns land in the shape's data panel. Link a file
+  on disk and Refresh Data goes back for whatever it says now
 - Conditional formatting: colour every shape by one of its data fields, with
   the rules it derived kept on the document so the colours can be retraced
 - PNG export, headless and scriptable
@@ -129,6 +133,7 @@ diagramcraft drawing.vsdx                     # import a Visio drawing
 diagramcraft export in.lucid out.png 2        # render to PNG at 2x
 diagramcraft export in.lucid out.svg          # ...or to vector SVG
 diagramcraft export in.lucid out.pdf          # ...or to PDF
+diagramcraft export in.lucid out.vsdx         # ...or to a Visio drawing
 diagramcraft import in.vsdx out.lucid         # convert Visio, headlessly
 diagramcraft preview in.lucid shot.png        # screenshot the editor itself
 diagramcraft preview in.lucid shot.png --hover   # ...with the connect arrows out
@@ -223,7 +228,7 @@ Seven crates, each independently testable:
 |---|---|
 | `dc-model` | Document types, serde, markup parsing. No I/O. |
 | `dc-lucid` | `.lucid` package read/write and validation. |
-| `dc-vsdx` | Visio `.vsdx` import: OPC container, XML parts, coordinates. |
+| `dc-vsdx` | Visio `.vsdx` import and export: OPC container, XML, units. |
 | `dc-geom` | Shape outlines, connector routing, endpoint markers. Pure geometry. |
 | `dc-render` | Vello scene construction, camera, theme, text. No GPU ownership. |
 | `dc-export` | SVG and PDF writers over one shared traversal. No GPU. |
@@ -235,7 +240,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 1065 tests
+cargo test --workspace     # 1091 tests
 ```
 
 ## Scope
@@ -287,7 +292,12 @@ Known limits:
   `PlainEditor`, which lays out in a single style. Where a label mixes font
   sizes, clicking into it can land a character off. The painted text is always
   the real, mixed-style layout.
-- **`.vsdx` export.** Import only; DiagramCraft writes `.lucid`.
+- **Visio export carries geometry, not stencils.** Each shape is written
+  with its own outline rather than as an instance of a Visio master, so a
+  drawing opens looking right and stays editable, but the shapes arrive as
+  plain geometry rather than as Visio flowchart stencils. Curves are
+  flattened finely enough not to be told apart; straight edges stay single
+  segments.
 - **Images in vector exports.** A shape with an image fill exports as a flat
   placeholder rather than the picture; SVG and PDF embedding of bitmaps is
   not implemented.

@@ -282,6 +282,21 @@ pub struct Page {
     pub extra: Map<String, Value>,
 }
 
+/// A remembered binding between shapes and a table of data.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataLink {
+    /// The entry name within the package's `data` directory.
+    pub source: String,
+    /// The column whose values are matched against shape labels.
+    pub key_column: String,
+    /// Where the source came from on disk, when it came from outside the
+    /// document. Refreshing re-reads this; without it, refreshing re-reads
+    /// the copy the package carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
 /// A straight line an author placed to align things against.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Guide {
@@ -425,6 +440,18 @@ pub struct Document {
     pub document_settings: Option<DocumentSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_bootstrap_data: Option<ExtensionBootstrapData>,
+    /// Data links this document remembers, under a namespaced key.
+    ///
+    /// An extension, like the formatting rules beside it. Keeping the
+    /// binding is what makes a link refreshable rather than a one-off: the
+    /// document records what it was matched against and can be told to do it
+    /// again when the data has moved on.
+    #[serde(
+        rename = "dcDataLinks",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub data_links: Option<Vec<DataLink>>,
     /// Conditional-formatting rules, under a namespaced key.
     ///
     /// An extension: the published specification has none. The name is
@@ -452,6 +479,7 @@ impl Document {
             pages: vec![Page::new("page1", "Page 1")],
             document_settings: None,
             extension_bootstrap_data: None,
+            data_links: None,
             format_rules: None,
             extra: Map::new(),
         }

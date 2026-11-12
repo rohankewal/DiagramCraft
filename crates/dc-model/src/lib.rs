@@ -28,6 +28,7 @@ mod string_enum;
 
 pub use color::Color;
 pub use document::{
+    DataLink,
     Guide,
     Collection, Document, DocumentSettings, ExtensionBootstrapData, FORMAT_VERSION, Group, Layer,
     Page, PageSettings, PageSize, Units,

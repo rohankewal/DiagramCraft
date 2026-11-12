@@ -33,7 +33,7 @@ DiagramCraft — open-source diagramming in pure Rust
 
 USAGE:
     diagramcraft [FILE.lucid | FILE.vsdx]
-    diagramcraft export <IN.lucid> <OUT.png|OUT.svg|OUT.pdf> [SCALE]
+    diagramcraft export <IN.lucid> <OUT.png|OUT.svg|OUT.pdf|OUT.vsdx> [SCALE]
                                               [--transparent]
     diagramcraft import <IN.vsdx> <OUT.lucid>
     diagramcraft icon <OUT.png> [SIZE]
@@ -42,6 +42,7 @@ USAGE:
                                               [--menu NAME] [--library NAME]
                                               [--hover] [--connect]
                                               [--tidy] [--across] [--rulers]
+                                              [--present]
                                               [--settings] [--bold] [--line]
     diagramcraft --help
 ";
@@ -122,6 +123,16 @@ fn run_export(args: &[String]) -> ExitCode {
 
     match extension.as_str() {
         "svg" => match dc_export::write_svg(&package.document, 0, options, Path::new(output)) {
+            Ok(()) => {
+                println!("wrote {output}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("diagramcraft: export failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "vsdx" => match dc_vsdx::write_vsdx_path(&package.document, Path::new(output)) {
             Ok(()) => {
                 println!("wrote {output}");
                 ExitCode::SUCCESS
@@ -291,6 +302,10 @@ fn run_preview(args: &[String]) -> ExitCode {
         editor.clear_selection();
     }
 
+    // `--present` shows what a slide looks like: no chrome, no grid, the
+    // page framed to fill the window.
+    let presenting = args.iter().any(|a| a == "--present");
+
     // Opens the first label so a screenshot can show the editing state.
     if editing {
         let mut fonts = parley::FontContext::new();
@@ -326,6 +341,7 @@ fn run_preview(args: &[String]) -> ExitCode {
         open_menu,
         settings_open,
         args.iter().any(|a| a == "--rulers"),
+        presenting,
         Path::new(output),
     ) {
         Ok((w, h)) => {

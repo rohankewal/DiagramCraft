@@ -1,6 +1,6 @@
 [package]
 name = "dc-vsdx"
-description = "Importer for Visio .vsdx drawings"
+description = "Visio .vsdx import and export"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 dc-model = { workspace = true }
+dc-geom = { workspace = true }
+kurbo = { workspace = true }
 quick-xml = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

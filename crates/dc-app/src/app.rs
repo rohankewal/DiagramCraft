@@ -699,9 +699,46 @@ impl App {
         }
     }
 
+    /// Moves to the next or previous page while presenting.
+    ///
+    /// Stops at the ends rather than wrapping: running off the last slide
+    /// back to the first is rarely what was meant, and there is no way to
+    /// tell it from a deliberate press.
+    fn present_step(&mut self, forward: bool) {
+        let count = self.editor.document().pages.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.editor.page_index;
+        let next = if forward {
+            (current + 1).min(count - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        if next != current {
+            self.editor.select_page(next);
+        }
+        // Each slide is framed on arrival, so a page drawn at a different
+        // scale still fills the screen.
+        self.sync_canvas_viewport();
+        self.editor.zoom_to_fit();
+        self.request_redraw();
+    }
+
     fn on_pointer_down(&mut self, button: MouseButton) {
         let chrome = self.chrome();
         self.shape_tile_press = false;
+
+        // Presenting: a click steps forward and a right click steps back,
+        // which is what a pointer or a clicker sends.
+        if self.view.presenting {
+            match button {
+                MouseButton::Left => self.present_step(true),
+                MouseButton::Right => self.present_step(false),
+                _ => {}
+            }
+            return;
+        }
 
         if button == MouseButton::Right {
             self.editor.commit_text_edit();
@@ -1009,6 +1046,39 @@ impl App {
     /// what must be inserted: deriving characters from key codes mishandles
     /// dead keys, alternate layouts, and shifted symbols.
     fn on_key(&mut self, key: &Key, state: ElementState, text: Option<&str>) {
+        // Presenting takes the keyboard first and keeps it simple: step
+        // through the slides, or leave. Nothing else should be reachable
+        // when the editor is not on screen to show what it did.
+        if self.view.presenting {
+            if state == ElementState::Pressed {
+                match key {
+                    Key::Named(NamedKey::Escape) => self.perform(UiAction::StopPresenting),
+                    Key::Named(
+                        NamedKey::ArrowRight | NamedKey::ArrowDown | NamedKey::PageDown,
+                    )
+                    | Key::Named(NamedKey::Space) => self.present_step(true),
+                    Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp | NamedKey::PageUp) => {
+                        self.present_step(false)
+                    }
+                    Key::Named(NamedKey::Home) => {
+                        self.editor.select_page(0);
+                        self.editor.zoom_to_fit();
+                        self.request_redraw();
+                    }
+                    Key::Named(NamedKey::End) => {
+                        let last = self.editor.document().pages.len().saturating_sub(1);
+                        self.editor.select_page(last);
+                        self.editor.zoom_to_fit();
+                        self.request_redraw();
+                    }
+                    // A space arrives as text on some layouts.
+                    _ if text == Some(" ") => self.present_step(true),
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         // The palette search is a plain field, not a document label, so it
         // takes keystrokes without going anywhere near `TextEdit`.
         if self.view.palette_search_focused {
@@ -1545,6 +1615,20 @@ impl App {
                 }
             }
 
+            UiAction::ExportVisio => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Visio drawing", &["vsdx"])
+                    .set_file_name("diagram.vsdx")
+                    .save_file()
+                {
+                    self.editor.status =
+                        match dc_vsdx::write_vsdx_path(&self.editor.package.document, &path) {
+                            Ok(()) => "Exported Visio drawing".into(),
+                            Err(e) => format!("Could not export: {e}"),
+                        };
+                }
+            }
+
             UiAction::InsertImage => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp"])
@@ -1701,6 +1785,43 @@ impl App {
             UiAction::ColorByField(field) => {
                 self.editor.color_by_field(&field);
             }
+            UiAction::LinkExternalData => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("CSV data", &["csv", "tsv", "txt"])
+                    .pick_file()
+                {
+                    self.editor.link_external_data(&path, None);
+                }
+            }
+
+            UiAction::StartPresenting => {
+                self.editor.commit_text_edit();
+                self.editor.clear_selection();
+                self.view.presenting = true;
+                // A slide is the drawing, not the workbench it was made on,
+                // so the graph paper and the sheet outline go away. The
+                // settings themselves are untouched and come back on exit.
+                self.apply_settings();
+                // The canvas only becomes the whole window once the chrome
+                // is rebuilt, so the viewport is resized before framing —
+                // fitting against the old, smaller canvas would leave the
+                // first slide badly placed.
+                self.sync_canvas_viewport();
+                self.editor.zoom_to_fit();
+                self.editor.status = String::new();
+            }
+
+            UiAction::StopPresenting => {
+                self.view.presenting = false;
+                self.apply_settings();
+                self.sync_canvas_viewport();
+                self.editor.zoom_to_fit();
+            }
+
+            UiAction::RefreshDataLinks => {
+                self.editor.refresh_data_links();
+            }
+
             UiAction::ApplyFormatRules => {
                 self.editor.apply_format_rules();
             }
@@ -1866,12 +1987,13 @@ impl App {
 
     fn apply_settings(&mut self) {
         let s = &self.view.settings;
+        let presenting = self.view.presenting;
 
         let options = &mut self.document_renderer.options;
-        options.show_grid = s.show_grid;
+        options.show_grid = s.show_grid && !presenting;
         options.grid_style = s.grid_style;
         options.grid_spacing = s.grid_spacing;
-        options.show_page_bounds = s.show_page_bounds;
+        options.show_page_bounds = s.show_page_bounds && !presenting;
         options.route_around_shapes = s.route_around_shapes;
 
         self.document_renderer.theme = if s.dark_theme {

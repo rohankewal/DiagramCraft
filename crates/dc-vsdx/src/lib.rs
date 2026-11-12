@@ -28,6 +28,9 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 pub mod masters;
+pub mod write;
+
+pub use write::{WriteError, write as write_vsdx, write_path as write_vsdx_path};
 pub mod package;
 pub mod sheet;
 pub mod xml;

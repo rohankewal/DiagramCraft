@@ -52,6 +52,8 @@ pub enum UiAction {
     ExportVector {
         pdf: bool,
     },
+    /// Export the document as a Visio drawing.
+    ExportVisio,
     SetPageSize(String),
     ToggleInfiniteCanvas,
     Quit,
@@ -157,6 +159,10 @@ pub enum UiAction {
     GuidesFromSelection,
     TidyLayout(bool),
     ColorByField(String),
+    LinkExternalData,
+    RefreshDataLinks,
+    StartPresenting,
+    StopPresenting,
     ApplyFormatRules,
     ClearFormatRules,
     Ungroup,
@@ -449,6 +455,27 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The whole window as canvas, for presenting.
+    ///
+    /// Nothing else is laid out: a presentation is the drawing and nothing
+    /// around it, so the panels, menu bar and tabs are not merely hidden,
+    /// they are not given anywhere to be.
+    pub fn presenting(viewport: Vec2) -> Self {
+        let w = viewport.x.max(1.0);
+        let h = viewport.y.max(1.0);
+        let none = Rect::new(0.0, 0.0, 0.0, 0.0);
+        Layout {
+            viewport,
+            menubar: none,
+            left_panel: none,
+            right_panel: none,
+            canvas: Rect::new(0.0, 0.0, w, h),
+            tabs: none,
+            ruler_top: None,
+            ruler_left: None,
+        }
+    }
+
     /// Lays the window out, reserving space for the rulers when they are on.
     ///
     /// The rulers take their strip out of the canvas rather than overlaying
@@ -604,6 +631,22 @@ impl Chrome {
         tab_drag: Option<TabDrag>,
         context_menu: Option<(ContextTarget, kurbo::Point)>,
     ) -> Chrome {
+        // Presenting leaves the chrome out entirely, so there is nothing to
+        // hit and nothing to draw over the page.
+        if view.presenting {
+            return Chrome {
+                layout: Layout::presenting(window),
+                regions: Vec::new(),
+                open_menu: None,
+                context_menu: None,
+                settings_sheet: None,
+                template_gallery: None,
+                layers_panel: None,
+                find_bar: None,
+                tab_rects: Vec::new(),
+            };
+        }
+
         let layout = Layout::compute_with_rulers(window, metrics, view.settings.show_rulers);
         let mut regions = Vec::new();
         let menus = menu::menus(editor, view);
@@ -5303,4 +5346,25 @@ mod tests {
         );
         assert_eq!(local, Point::new(30.0, 40.0));
     }
+    #[test]
+    fn presenting_gives_the_whole_window_to_the_drawing() {
+        let l = Layout::presenting(Vec2::new(1200.0, 800.0));
+        assert_eq!(l.canvas, Rect::new(0.0, 0.0, 1200.0, 800.0));
+        assert_eq!(l.menubar.area(), 0.0, "no menu bar while presenting");
+        assert_eq!(l.left_panel.area(), 0.0);
+        assert_eq!(l.right_panel.area(), 0.0);
+        assert_eq!(l.tabs.area(), 0.0);
+        assert!(l.ruler_top.is_none() && l.ruler_left.is_none());
+    }
+
+    #[test]
+    fn presenting_builds_no_chrome_to_click() {
+        let mut e = editor();
+        e.create_shape(ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 100.0, 60.0));
+        let view = ViewState { presenting: true, ..Default::default() };
+        let c = Chrome::build_for(window(), &e, &Metrics::default(), &view, None, None, None);
+        assert!(c.regions.is_empty(), "a presentation has nothing to hit");
+        assert!(c.tab_rects.is_empty());
+    }
+
 }

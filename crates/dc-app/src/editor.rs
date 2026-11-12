@@ -3089,11 +3089,123 @@ impl Editor {
             }
         }
 
+        self.remember_data_link(source_name, key_column, None);
         self.status = format!(
             "Linked {linked} of {} shapes to {source_name}",
             targets.len()
         );
         linked
+    }
+
+    /// The links this document remembers.
+    pub fn data_links(&self) -> &[dc_model::DataLink] {
+        self.package.document.data_links.as_deref().unwrap_or(&[])
+    }
+
+    /// Records a binding, replacing one for the same source rather than
+    /// collecting a second entry that would run twice on refresh.
+    fn remember_data_link(&mut self, source: &str, key_column: &str, path: Option<String>) {
+        let link = dc_model::DataLink {
+            source: source.to_string(),
+            key_column: key_column.to_string(),
+            path,
+        };
+        let links = self.package.document.data_links.get_or_insert_with(Vec::new);
+        match links.iter().position(|l| l.source == link.source) {
+            Some(i) => links[i] = link,
+            None => links.push(link),
+        }
+        self.dirty = true;
+    }
+
+    /// Binds a CSV sitting outside the document.
+    ///
+    /// A copy is taken into the package so the document still carries its
+    /// data when the file is not to hand, and the path is kept so a refresh
+    /// can go back for whatever the file says now. The copy is the fallback,
+    /// not the source of truth.
+    pub fn link_external_data(&mut self, path: &Path, key_column: Option<&str>) -> usize {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.status = format!("Could not read {}: {e}", path.display());
+                return 0;
+            }
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "data.csv".to_string());
+
+        let Some(source) = dc_lucid::DataSource::parse(&name, &bytes) else {
+            self.status = format!("{name} has no header row");
+            return 0;
+        };
+        let key = match key_column {
+            Some(k) => k.to_string(),
+            // Without a column named, the first is the conventional id.
+            None => match source.headers.first() {
+                Some(h) => h.trim().to_string(),
+                None => {
+                    self.status = format!("{name} has no columns");
+                    return 0;
+                }
+            },
+        };
+
+        self.as_one_change(|e| {
+            e.package.data.insert(name.clone(), bytes);
+            let linked = e.link_data(&name, &key);
+            e.remember_data_link(&name, &key, Some(path.display().to_string()));
+            linked
+        })
+    }
+
+    /// Runs every remembered link again.
+    ///
+    /// A link that came from a file on disk is re-read first, so a refresh
+    /// picks up whatever the file says now rather than replaying the copy
+    /// taken when it was first linked.
+    pub fn refresh_data_links(&mut self) -> usize {
+        let links = self.data_links().to_vec();
+        if links.is_empty() {
+            self.status = "This document has no data links".into();
+            return 0;
+        }
+
+        let mut reread = 0;
+        let mut missing: Vec<String> = Vec::new();
+        for link in &links {
+            let Some(path) = link.path.as_ref() else {
+                continue;
+            };
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    self.package.data.insert(link.source.clone(), bytes);
+                    reread += 1;
+                }
+                // A file that has moved is not an error worth refusing the
+                // whole refresh over; the bundled copy still stands in.
+                Err(_) => missing.push(link.source.clone()),
+            }
+        }
+
+        let total = self.as_one_change(|e| {
+            let mut total = 0;
+            for link in &links {
+                total += e.link_data(&link.source, &link.key_column);
+            }
+            total
+        });
+
+        self.status = match missing.as_slice() {
+            [] => format!("Refreshed {total} shape(s) from {reread} file(s)"),
+            names => format!(
+                "Refreshed {total} shape(s); could not re-read {}",
+                names.join(", ")
+            ),
+        };
+        total
     }
 
     // ---------------------------------------------------------------- guides
@@ -4980,6 +5092,152 @@ mod tests {
         let sources = e.data_sources();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].headers, vec!["id", "owner", "status"]);
+    }
+
+    #[test]
+    fn linking_remembers_the_binding_so_it_can_be_run_again() {
+        let (mut e, _, _) = editor_with_data();
+        assert!(e.data_links().is_empty());
+
+        e.link_data("records.csv", "id");
+        let links = e.data_links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].source, "records.csv");
+        assert_eq!(links[0].key_column, "id");
+        assert!(links[0].path.is_none(), "a bundled source has no path");
+    }
+
+    #[test]
+    fn linking_the_same_source_twice_keeps_one_binding() {
+        let (mut e, _, _) = editor_with_data();
+        e.link_data("records.csv", "id");
+        e.link_data("records.csv", "id");
+        assert_eq!(
+            e.data_links().len(),
+            1,
+            "running a link again must not queue it to run twice on refresh"
+        );
+    }
+
+    #[test]
+    fn a_link_that_matched_nothing_is_not_remembered() {
+        let (mut e, _, _) = editor_with_data();
+        // `owner` holds ops and sales; no shape is labelled either, so the
+        // link finds nothing and there is no binding worth keeping.
+        assert_eq!(e.link_data("records.csv", "owner"), 0);
+        assert!(
+            e.data_links().is_empty(),
+            "a refresh should not replay a link that never matched"
+        );
+    }
+
+    #[test]
+    fn refreshing_picks_up_a_changed_bundled_source() {
+        let (mut e, matching, _) = editor_with_data();
+        e.link_data("records.csv", "id");
+        assert_eq!(
+            data_of(&e, &matching)
+                .iter()
+                .find(|(k, _)| k == "owner")
+                .map(|(_, v)| v.clone()),
+            Some("ops".to_string())
+        );
+
+        e.package.data.insert(
+            "records.csv".into(),
+            b"id,owner,status\nalpha,platform,live\n".to_vec(),
+        );
+        assert_eq!(e.refresh_data_links(), 1);
+        assert_eq!(
+            data_of(&e, &matching)
+                .iter()
+                .find(|(k, _)| k == "owner")
+                .map(|(_, v)| v.clone()),
+            Some("platform".to_string()),
+            "refreshing should take the new value"
+        );
+    }
+
+    #[test]
+    fn refreshing_with_no_links_says_so() {
+        let (mut e, _, _) = editor_with_data();
+        assert_eq!(e.refresh_data_links(), 0);
+        assert!(e.status.contains("no data links"), "got {:?}", e.status);
+    }
+
+    #[test]
+    fn an_external_csv_is_linked_and_copied_into_the_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("people.csv");
+        std::fs::write(&csv, b"id,owner\nalpha,ops\n").unwrap();
+
+        let (mut e, matching, _) = editor_with_data();
+        assert_eq!(e.link_external_data(&csv, None), 1);
+
+        assert!(
+            e.package.data.contains_key("people.csv"),
+            "a copy should travel with the document"
+        );
+        let link = e.data_links().iter().find(|l| l.source == "people.csv").unwrap();
+        assert!(link.path.is_some(), "and the path kept, so it can be refreshed");
+        assert_eq!(link.key_column, "id", "the first column is the default key");
+        assert!(data_of(&e, &matching).iter().any(|(k, _)| k == "owner"));
+    }
+
+    #[test]
+    fn refreshing_rereads_the_file_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("people.csv");
+        std::fs::write(&csv, b"id,owner\nalpha,ops\n").unwrap();
+
+        let (mut e, matching, _) = editor_with_data();
+        e.link_external_data(&csv, None);
+
+        // The file changes outside the editor, which is the whole point.
+        std::fs::write(&csv, b"id,owner\nalpha,platform\n").unwrap();
+        e.refresh_data_links();
+
+        assert_eq!(
+            data_of(&e, &matching)
+                .iter()
+                .find(|(k, _)| k == "owner")
+                .map(|(_, v)| v.clone()),
+            Some("platform".to_string())
+        );
+    }
+
+    #[test]
+    fn a_file_that_has_moved_falls_back_to_the_bundled_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("people.csv");
+        std::fs::write(&csv, b"id,owner\nalpha,ops\n").unwrap();
+
+        let (mut e, matching, _) = editor_with_data();
+        e.link_external_data(&csv, None);
+        std::fs::remove_file(&csv).unwrap();
+
+        // Still refreshes from the copy, and says which file it could not read.
+        assert_eq!(e.refresh_data_links(), 1);
+        assert!(e.status.contains("people.csv"), "got {:?}", e.status);
+        assert!(data_of(&e, &matching).iter().any(|(k, v)| k == "owner" && v == "ops"));
+    }
+
+    #[test]
+    fn an_unreadable_external_file_links_nothing() {
+        let (mut e, _, _) = editor_with_data();
+        assert_eq!(e.link_external_data(Path::new("/nowhere/absent.csv"), None), 0);
+        assert!(e.data_links().is_empty());
+    }
+
+    #[test]
+    fn data_links_survive_a_round_trip_through_the_document() {
+        let (mut e, _, _) = editor_with_data();
+        e.link_data("records.csv", "id");
+
+        let json = serde_json::to_string(&e.package.document).unwrap();
+        assert!(json.contains("dcDataLinks"), "written under its namespaced key");
+        let back: dc_model::Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.data_links, e.package.document.data_links);
     }
 
     #[test]

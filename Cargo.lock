@@ -754,7 +754,9 @@ dependencies = [
 name = "dc-vsdx"
 version = "0.1.0"
 dependencies = [
+ "dc-geom",
  "dc-model",
+ "kurbo",
  "log",
  "quick-xml 0.42.0",
  "serde_json",
