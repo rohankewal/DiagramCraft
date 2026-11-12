@@ -46,6 +46,10 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - Rulers, and guides dragged off them that shapes snap to
 - Presentation mode: pages full-screen with the chrome gone, arrow keys or
   a clicker to step through
+- Revision history: every save keeps a copy, browsable and restorable long
+  after the undo stack is gone
+- Comments that live in the document: leave one on a shape or the page,
+  resolve it when it is dealt with, and it travels with the file
 
 **Text**
 - Edit labels in place: double-click a shape or connector, or press Enter
@@ -240,7 +244,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 1091 tests
+cargo test --workspace     # 1115 tests
 ```
 
 ## Scope
@@ -267,9 +271,10 @@ Known limits:
   perfectly — the format already carries types a reader does not recognise —
   but another tool will show them as unknown shapes rather than drawing
   them. The eight published libraries are unaffected.
-- **Three fields are extensions.** A shape's lock, a page's guides, and the
-  document's formatting rules have no published counterpart, so they are
-  written under names of our own (`locked`, `dcGuides`, `dcFormatRules`).
+- **Five fields are extensions.** A shape's lock, a page's guides, and the
+  document's formatting rules, data links and comments have no published
+  counterpart, so they are written under names of our own (`locked`,
+  `dcGuides`, `dcFormatRules`, `dcDataLinks`, `dcComments`).
   The format already carries fields a reader does not interpret, so these
   cost a round trip nothing — but another tool will not act on them.
 - **Data links are a one-time copy.** Matching a shape label against a column
@@ -306,7 +311,15 @@ Known limits:
   exports as `?`. Writing it as real text would mean embedding a font with a
   CID mapping, which is the cost the base fonts exist to avoid. SVG has no
   such limit.
-- **Real-time collaboration and comments.** Out of scope.
+- **Real-time collaboration.** Out of scope: it needs a server, and this
+  editor is meant to work with no account at all. Comments are in the file
+  instead, so review works offline — the trade being that two people
+  commenting on separate copies have two sets of comments until the copies
+  are brought back together.
+- **Revision history is local.** Copies are kept in the application's own
+  directory, keyed by the document's path, not inside the `.lucid` and not
+  beside it. They therefore do not travel with the file, and a document
+  moved to another machine arrives with no history.
 
 ## Compatibility
 

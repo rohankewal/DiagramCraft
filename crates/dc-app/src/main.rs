@@ -15,6 +15,7 @@ mod export;
 mod history;
 mod icon;
 mod library;
+mod revisions;
 mod menu;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -42,7 +43,7 @@ USAGE:
                                               [--menu NAME] [--library NAME]
                                               [--hover] [--connect]
                                               [--tidy] [--across] [--rulers]
-                                              [--present]
+                                              [--present] [--comment]
                                               [--settings] [--bold] [--line]
     diagramcraft --help
 ";
@@ -260,6 +261,9 @@ fn run_preview(args: &[String]) -> ExitCode {
         .unwrap_or(dc_model::ShapeLibrary::Standard);
 
     let mut editor = editor::Editor::new();
+    // A preview renders someone's document without being asked to change
+    // anything, so it leaves no revision behind.
+    editor.keep_revisions = false;
     if let Err(e) = editor.open_path(Path::new(input)) {
         eprintln!("diagramcraft: could not read {input}: {e}");
         return ExitCode::FAILURE;
@@ -285,6 +289,15 @@ fn run_preview(args: &[String]) -> ExitCode {
             }
             editor.hovered = Some(id);
             editor.refresh_ports();
+        }
+    }
+
+    // `--comment` leaves a remark on the first shape, so the mark on the
+    // canvas and the panel section can be looked at.
+    if args.iter().any(|a| a == "--comment") {
+        if let Some(id) = editor.page().shapes().first().map(|s| s.id.clone()) {
+            editor.selection = vec![id];
+            editor.add_comment("Is this step still needed?", "sam");
         }
     }
 

@@ -54,6 +54,12 @@ pub enum UiAction {
     },
     /// Export the document as a Visio drawing.
     ExportVisio,
+    /// Opens and closes the revision history.
+    OpenRevisions,
+    CloseRevisions,
+    ClearRevisions,
+    /// Puts the document back to a revision, by index into the list.
+    RestoreRevision(usize),
     SetPageSize(String),
     ToggleInfiniteCanvas,
     Quit,
@@ -100,6 +106,14 @@ pub enum UiAction {
     /// Puts keystrokes into a custom-data entry's key or value field.
     FocusCustomDataKey(usize),
     FocusCustomDataValue(usize),
+    /// Puts keystrokes into the new-comment field.
+    FocusCommentField,
+    /// Leaves whatever is in the comment field, on the selection when there
+    /// is one.
+    AddComment,
+    /// Marks a comment dealt with, or reopens it.
+    SetCommentResolved(String, bool),
+    DeleteComment(String),
     /// Shows or hides the layers panel.
     ToggleLayersPanel,
     AddLayer,
@@ -561,6 +575,8 @@ pub struct Chrome {
     pub settings_sheet: Option<Rect>,
     /// The "New from Template" gallery's sheet, when it is up.
     pub template_gallery: Option<Rect>,
+    /// The revision history sheet, when it is up.
+    pub revisions_sheet: Option<Rect>,
     /// The layers panel, when it is open.
     pub layers_panel: Option<Rect>,
     /// The find bar, when it is open.
@@ -641,6 +657,7 @@ impl Chrome {
                 context_menu: None,
                 settings_sheet: None,
                 template_gallery: None,
+                revisions_sheet: None,
                 layers_panel: None,
                 find_bar: None,
                 tab_rects: Vec::new(),
@@ -686,6 +703,9 @@ impl Chrome {
         let template_gallery = view
             .template_gallery_open
             .then(|| build_template_gallery(&layout, view, &mut regions));
+        let revisions_sheet = view
+            .revisions_open
+            .then(|| build_revisions_sheet(&layout, view, &mut regions));
 
         // The settings screen covers everything, menus included.
         let settings_sheet = view
@@ -699,6 +719,7 @@ impl Chrome {
             context_menu,
             settings_sheet,
             template_gallery,
+            revisions_sheet,
             layers_panel,
             find_bar,
             tab_rects,
@@ -750,6 +771,7 @@ impl Chrome {
         // nothing is over the canvas while either is up.
         if self.settings_sheet.is_some()
             || self.template_gallery.is_some()
+            || self.revisions_sheet.is_some()
             || self.covered_by_open_menu(p)
             || self.covered_by_context_menu(p)
         {
@@ -2310,7 +2332,98 @@ fn build_properties(layout: &Layout, editor: &Editor, view: &ViewState, out: &mu
         y += ROW_HEIGHT + PAD;
     }
 
+    build_comments(editor, view, x0, x1, &mut y, out);
     finish_properties(editor, x0, x1, &mut y, out);
+}
+
+/// Comments: a field to leave one, then the ones already left.
+///
+/// A comment on the selected shape is marked as such, so the list says what
+/// each one is about without having to click through them.
+fn build_comments(
+    editor: &Editor,
+    view: &ViewState,
+    x0: f64,
+    x1: f64,
+    y: &mut f64,
+    out: &mut Vec<Region>,
+) {
+    let open = editor.open_comments();
+    // Nothing to show and nowhere to put one: a comment needs either a
+    // selection to attach to or an existing thread to join.
+    if open.is_empty() && editor.selection.is_empty() {
+        return;
+    }
+
+    out.push(Region {
+        rect: Rect::new(x0, *y, x1, *y + ROW_HEIGHT),
+        action: UiAction::NoOp,
+        label: "Comments".into(),
+        kind: RegionKind::Heading,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    *y += ROW_HEIGHT;
+
+    out.push(Region {
+        rect: Rect::new(x0, *y, x1, *y + ROW_HEIGHT),
+        action: UiAction::FocusCommentField,
+        label: view.comment_edit.clone(),
+        kind: RegionKind::TextField {
+            focused: view.comment_edit_focused,
+            placeholder: if editor.selection.is_empty() {
+                "Comment on this page…"
+            } else {
+                "Comment on the selection…"
+            },
+        },
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    *y += ROW_HEIGHT + 4.0;
+
+    if !view.comment_edit.trim().is_empty() {
+        out.push(button(
+            Rect::new(x0, *y, x1, *y + ROW_HEIGHT),
+            "Add Comment",
+            UiAction::AddComment,
+        ));
+        *y += ROW_HEIGHT + 4.0;
+    }
+
+    for comment in open {
+        let about = match &comment.shape_id {
+            Some(id) if editor.selection.iter().any(|s| s == id) => "on this shape",
+            Some(_) => "on another shape",
+            None => "on the page",
+        };
+        out.push(Region {
+            rect: Rect::new(x0, *y, x1, *y + ROW_HEIGHT),
+            action: UiAction::NoOp,
+            label: format!("{} — {about}", comment.text),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        *y += ROW_HEIGHT;
+
+        let half = (x0 + x1) / 2.0;
+        out.push(button(
+            Rect::new(x0, *y, half - 3.0, *y + ROW_HEIGHT),
+            "Resolve",
+            UiAction::SetCommentResolved(comment.id.clone(), true),
+        ));
+        out.push(button(
+            Rect::new(half + 3.0, *y, x1, *y + ROW_HEIGHT),
+            "Delete",
+            UiAction::DeleteComment(comment.id.clone()),
+        ));
+        *y += ROW_HEIGHT + 4.0;
+    }
+    *y += PAD;
 }
 
 /// The rows every selection gets: ordering, and what is selected.
@@ -2902,6 +3015,111 @@ const TEMPLATE_GALLERY_WIDTH: f64 = 440.0;
 /// Lays out the "New from Template" gallery as a modal sheet, the same
 /// construction `build_settings` uses: a scrim that closes it on a miss,
 /// and a sheet sized to its content and clamped to the window.
+/// The revision history: a list of saves, newest first, each restorable.
+fn build_revisions_sheet(layout: &Layout, view: &ViewState, out: &mut Vec<Region>) -> Rect {
+    let window = Rect::new(0.0, 0.0, layout.viewport.x, layout.viewport.y);
+    out.push(Region {
+        rect: window,
+        action: UiAction::CloseRevisions,
+        label: String::new(),
+        kind: RegionKind::Scrim,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+
+    let width = TEMPLATE_GALLERY_WIDTH.clamp(1.0, layout.viewport.x - 40.0);
+    let rows = view.revisions.len().max(1) as f64;
+    let content_height = 16.0 + 24.0 + 10.0 + rows * (ROW_HEIGHT + 8.0) + 16.0 + ROW_HEIGHT + 16.0;
+    let height = content_height.clamp(1.0, layout.viewport.y - 40.0);
+    let sheet = Rect::from_center_size(
+        kurbo::Point::new(layout.viewport.x / 2.0, layout.viewport.y / 2.0),
+        (width, height),
+    );
+    out.push(Region {
+        rect: sheet,
+        action: UiAction::NoOp,
+        label: String::new(),
+        kind: RegionKind::Sheet,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+
+    let x0 = sheet.x0 + 20.0;
+    let x1 = sheet.x1 - 20.0;
+    let mut y = sheet.y0 + 16.0;
+
+    out.push(Region {
+        rect: Rect::new(x0, y, x1, y + 24.0),
+        action: UiAction::NoOp,
+        label: "Revision History".into(),
+        kind: RegionKind::Heading,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+    y += 34.0;
+
+    if view.revisions.is_empty() {
+        out.push(Region {
+            rect: Rect::new(x0, y, x1, y + ROW_HEIGHT),
+            action: UiAction::NoOp,
+            label: "No revisions yet — they are kept from the next save onward.".into(),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        y += ROW_HEIGHT + 8.0;
+    }
+
+    let limit = sheet.y1 - 16.0 - ROW_HEIGHT - 12.0;
+    for (i, (when, summary)) in view.revisions.iter().enumerate() {
+        if y + ROW_HEIGHT > limit {
+            break;
+        }
+        out.push(Region {
+            rect: Rect::new(x0, y, x1 - 96.0, y + ROW_HEIGHT),
+            action: UiAction::NoOp,
+            label: format!("{when}  ·  {summary}"),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        out.push(Region {
+            rect: Rect::new(x1 - 88.0, y, x1, y + ROW_HEIGHT),
+            action: UiAction::RestoreRevision(i),
+            label: "Restore".into(),
+            kind: RegionKind::Button,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        y += ROW_HEIGHT + 8.0;
+    }
+
+    if !view.revisions.is_empty() {
+        out.push(button(
+            Rect::new(x0, sheet.y1 - 16.0 - ROW_HEIGHT, x0 + 140.0, sheet.y1 - 16.0),
+            "Clear History",
+            UiAction::ClearRevisions,
+        ));
+    }
+    out.push(Region {
+        rect: Rect::new(x1 - 88.0, sheet.y1 - 16.0 - ROW_HEIGHT, x1, sheet.y1 - 16.0),
+        action: UiAction::CloseRevisions,
+        label: "Close".into(),
+        kind: RegionKind::Button,
+        selected: false,
+        emphasis: Emphasis::default(),
+        label_size: None,
+    });
+
+    sheet
+}
+
 fn build_template_gallery(layout: &Layout, view: &ViewState, out: &mut Vec<Region>) -> Rect {
     let window = Rect::new(0.0, 0.0, layout.viewport.x, layout.viewport.y);
     out.push(Region {

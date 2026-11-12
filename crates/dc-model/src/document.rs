@@ -282,6 +282,49 @@ pub struct Page {
     pub extra: Map<String, Value>,
 }
 
+/// A remark left on the document, or on one shape of it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comment {
+    pub id: String,
+    /// The shape it is about. A comment with none is about the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_id: Option<String>,
+    /// Who left it. Not authenticated — this is a note in a file, not a
+    /// claim about identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author: String,
+    pub text: String,
+    /// Seconds since the Unix epoch.
+    #[serde(default)]
+    pub created_at: u64,
+    /// Whether it has been dealt with. Resolved comments are kept rather
+    /// than deleted, so the record of what was asked survives.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolved: bool,
+}
+
+impl Comment {
+    pub fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
+        Comment {
+            id: id.into(),
+            shape_id: None,
+            author: String::new(),
+            text: text.into(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            resolved: false,
+        }
+    }
+
+    pub fn on_shape(mut self, shape_id: impl Into<String>) -> Self {
+        self.shape_id = Some(shape_id.into());
+        self
+    }
+}
+
 /// A remembered binding between shapes and a table of data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -440,6 +483,18 @@ pub struct Document {
     pub document_settings: Option<DocumentSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_bootstrap_data: Option<ExtensionBootstrapData>,
+    /// Comments left on the document, under a namespaced key.
+    ///
+    /// An extension. Comments live in the file rather than on a server, so
+    /// review works with no account and travels with the document — the
+    /// trade being that two people commenting on separate copies have two
+    /// sets of comments until the copies are brought back together.
+    #[serde(
+        rename = "dcComments",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub comments: Option<Vec<Comment>>,
     /// Data links this document remembers, under a namespaced key.
     ///
     /// An extension, like the formatting rules beside it. Keeping the
@@ -479,6 +534,7 @@ impl Document {
             pages: vec![Page::new("page1", "Page 1")],
             document_settings: None,
             extension_bootstrap_data: None,
+            comments: None,
             data_links: None,
             format_rules: None,
             extra: Map::new(),
@@ -510,7 +566,28 @@ impl Document {
     }
 
     /// An unused ID with the given prefix, suitable for a new item.
+    ///
+    /// The suffix is random rather than the next number up. Counting works
+    /// perfectly for one editor and fails the moment there are two: both
+    /// would look at their own copy, both would see `shape2` as the next
+    /// free name, and the two shapes could never be told apart when the
+    /// copies were brought back together. A random suffix costs nothing and
+    /// keeps that door open.
+    ///
+    /// IDs already in a document are left exactly as they are — this only
+    /// decides what a *new* item is called.
     pub fn fresh_id(&self, prefix: &str) -> String {
+        // Collisions are vanishingly unlikely but not impossible, and the
+        // document is right here, so it is cheaper to check than to reason
+        // about the odds.
+        for _ in 0..64 {
+            let candidate = format!("{prefix}-{}", random_suffix());
+            if !self.contains_id(&candidate) {
+                return candidate;
+            }
+        }
+        // Astronomically improbable; fall back to counting rather than
+        // looping forever or handing back a duplicate.
         for n in 1..u32::MAX {
             let candidate = format!("{prefix}{n}");
             if !self.contains_id(&candidate) {
@@ -519,6 +596,48 @@ impl Document {
         }
         unreachable!("exhausted the id space")
     }
+}
+
+/// A short random string for an identifier.
+///
+/// Drawn from the clock and a counter that never repeats within a run, then
+/// hashed so neighbouring calls do not produce neighbouring text. Two
+/// editors would have to create an item in the same nanosecond *and* collide
+/// through the hash to clash, which is the property that matters: ids
+/// invented apart stay distinct.
+fn random_suffix() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // `RandomState` is seeded per process, which is what makes two editors
+    // started separately disagree rather than march in step.
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(nanos);
+    hasher.write_u64(count);
+    base36(hasher.finish())
+}
+
+/// Lower-case base 36, which keeps an id short and safe in a file name, a
+/// URL, or an XML attribute without escaping.
+fn base36(mut value: u64) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if value == 0 {
+        return "0".into();
+    }
+    let mut out = Vec::new();
+    while value > 0 && out.len() < 8 {
+        out.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base 36 digits are ASCII")
 }
 
 impl Default for Document {
@@ -633,12 +752,69 @@ mod tests {
     }
 
     #[test]
-    fn fresh_id_skips_taken_ids() {
+    fn fresh_id_never_repeats_itself() {
+        let d = Document::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..2000 {
+            assert!(seen.insert(d.fresh_id("shape")), "fresh_id handed back a duplicate");
+        }
+    }
+
+    #[test]
+    fn fresh_id_keeps_its_prefix_so_an_id_still_reads() {
+        let d = Document::new();
+        let id = d.fresh_id("shape");
+        assert!(id.starts_with("shape-"), "got {id}");
+        assert!(id.len() > "shape-".len(), "the suffix should not be empty");
+        assert!(
+            id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "an id must be safe in a file name and an attribute: {id}"
+        );
+    }
+
+    #[test]
+    fn fresh_id_avoids_ids_the_document_already_uses() {
         let mut d = Document::new();
-        let page = &mut d.pages[0];
-        page.add_shape(Shape::new("shape1", ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 1.0, 1.0)));
-        page.add_shape(Shape::new("shape2", ShapeType::Rectangle, BoundingBox::new(0.0, 0.0, 1.0, 1.0)));
-        assert_eq!(d.fresh_id("shape"), "shape3");
+        let taken = d.fresh_id("shape");
+        d.pages[0].add_shape(Shape::new(
+            taken.clone(),
+            ShapeType::Rectangle,
+            BoundingBox::new(0.0, 0.0, 1.0, 1.0),
+        ));
+        for _ in 0..200 {
+            assert_ne!(d.fresh_id("shape"), taken);
+        }
+    }
+
+    #[test]
+    fn ids_already_in_a_document_are_left_alone() {
+        // A file written before this change keeps its counted ids; only new
+        // items get the new shape.
+        let mut d = Document::new();
+        d.pages[0].add_shape(Shape::new(
+            "shape1",
+            ShapeType::Rectangle,
+            BoundingBox::new(0.0, 0.0, 1.0, 1.0),
+        ));
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pages[0].shapes()[0].id, "shape1");
+    }
+
+    #[test]
+    fn two_documents_edited_apart_do_not_invent_the_same_id() {
+        // The property the whole change exists for: two editors, each
+        // looking only at its own copy, must not both produce the same name.
+        let a = Document::new();
+        let b = Document::new();
+        let from_a: std::collections::HashSet<String> =
+            (0..500).map(|_| a.fresh_id("shape")).collect();
+        let from_b: std::collections::HashSet<String> =
+            (0..500).map(|_| b.fresh_id("shape")).collect();
+        assert!(
+            from_a.is_disjoint(&from_b),
+            "two copies invented the same id, which is what this must prevent"
+        );
     }
 
     #[test]

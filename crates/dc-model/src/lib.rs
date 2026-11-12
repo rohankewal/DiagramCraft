@@ -28,6 +28,7 @@ mod string_enum;
 
 pub use color::Color;
 pub use document::{
+    Comment,
     DataLink,
     Guide,
     Collection, Document, DocumentSettings, ExtensionBootstrapData, FORMAT_VERSION, Group, Layer,

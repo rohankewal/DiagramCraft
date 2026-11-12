@@ -113,6 +113,9 @@ pub struct Overlay<'a> {
     /// Quick-connect arrows around the hovered shape, in document units.
     /// Dragging one draws a connector and makes the shape it lands on.
     pub quick_connect: &'a [Point],
+    /// Shapes carrying a comment nobody has dealt with, which are marked so
+    /// a remark is not missed just because the panel is closed.
+    pub commented: &'a [String],
     /// The item whose label is being edited.
     ///
     /// Its static text is suppressed so the live editing view is the only copy
@@ -545,6 +548,16 @@ impl Renderer {
                     decoration,
                 );
             }
+        }
+
+        // A mark inside the top-right corner on anything still being asked
+        // about. Set in from the corner itself, which is where the resize
+        // handle sits when the shape is selected.
+        if overlay.commented.iter().any(|id| id == &shape.id) {
+            let b = shape.bounding_box.aabb();
+            let r = (b.w.min(b.h) * 0.08).clamp(3.0, 5.0);
+            let dot = Circle::new((b.right() - r * 2.4, b.y + r * 2.4), r);
+            scene.fill(FillRule::NonZero, transform, px(self.theme.comment_mark), None, &dot);
         }
 
         if overlay.attach_target == Some(shape.id.as_str()) {

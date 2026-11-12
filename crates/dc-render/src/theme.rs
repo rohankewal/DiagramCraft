@@ -39,6 +39,8 @@ pub struct Theme {
     pub attach_highlight: Color,
     /// A guide the author placed, which stays on the page.
     pub placed_guide: Color,
+    /// The mark on a shape carrying an unresolved comment.
+    pub comment_mark: Color,
 
     /// Panel and toolbar backgrounds.
     pub panel: Color,
@@ -87,6 +89,7 @@ impl Theme {
             marquee_stroke: Color::rgb(0x4f, 0x46, 0xe5),
             attach_highlight: Color::rgb(0x10, 0xb9, 0x81),
             placed_guide: Color::rgb(0x38, 0xbd, 0xf8),
+            comment_mark: Color::rgb(0xf5, 0x9e, 0x0b),
 
             panel: Color::rgb(0xff, 0xff, 0xff),
             panel_border: Color::rgb(0xe2, 0xe6, 0xec),
@@ -119,6 +122,7 @@ impl Theme {
             marquee_stroke: Color::rgb(0x81, 0x7a, 0xf6),
             attach_highlight: Color::rgb(0x34, 0xd3, 0x99),
             placed_guide: Color::rgb(0x0e, 0xa5, 0xe9),
+            comment_mark: Color::rgb(0xfb, 0xbf, 0x24),
 
             panel: Color::rgb(0x1a, 0x1e, 0x27),
             panel_border: Color::rgb(0x2b, 0x31, 0x3d),

@@ -65,6 +65,13 @@ pub struct ViewState {
     pub saved_templates: Vec<String>,
     /// Whether the editor is presenting, which hides every panel.
     pub presenting: bool,
+    /// Whether the revision history is showing.
+    pub revisions_open: bool,
+    /// The comment being typed, and whether it is taking keystrokes.
+    pub comment_edit: String,
+    pub comment_edit_focused: bool,
+    /// The revisions of the open document, as date and summary.
+    pub revisions: Vec<(String, String)>,
 }
 
 /// The key a menu item's shortcut names.
@@ -258,6 +265,9 @@ fn file_menu(editor: &Editor) -> Menu {
             MenuItem::new("Export as SVG…", "", UiAction::ExportVector { pdf: false }),
             MenuItem::new("Export as PDF…", "", UiAction::ExportVector { pdf: true }),
             MenuItem::new("Export as Visio…", "", UiAction::ExportVisio),
+            MenuItem::separator(),
+            MenuItem::new("Revision History…", "", UiAction::OpenRevisions)
+                .enabled_when(editor.path.is_some()),
             MenuItem::separator(),
             // Lucidchart keeps page setup under File, and so does this.
             named("Page size: Letter", "letter"),

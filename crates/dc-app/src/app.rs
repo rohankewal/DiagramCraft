@@ -1079,6 +1079,30 @@ impl App {
             return;
         }
 
+        // The comment field is a plain field too, and is checked first so a
+        // comment can contain any character without the editor acting on it.
+        if self.view.comment_edit_focused {
+            if state == ElementState::Pressed {
+                match key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.view.comment_edit.clear();
+                        self.view.comment_edit_focused = false;
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        self.view.comment_edit.pop();
+                    }
+                    Key::Named(NamedKey::Enter) => self.perform(UiAction::AddComment),
+                    _ => {
+                        if let Some(text) = text {
+                            self.view.comment_edit.push_str(text);
+                        }
+                    }
+                }
+                self.request_redraw();
+            }
+            return;
+        }
+
         // The palette search is a plain field, not a document label, so it
         // takes keystrokes without going anywhere near `TextEdit`.
         if self.view.palette_search_focused {
@@ -1615,6 +1639,22 @@ impl App {
                 }
             }
 
+            UiAction::OpenRevisions => {
+                self.refresh_revisions();
+                self.view.revisions_open = true;
+            }
+            UiAction::CloseRevisions => self.view.revisions_open = false,
+            UiAction::ClearRevisions => {
+                self.editor.clear_revisions();
+                self.refresh_revisions();
+            }
+            UiAction::RestoreRevision(index) => {
+                if self.editor.restore_revision(index) {
+                    self.sync_images();
+                    self.view.revisions_open = false;
+                }
+            }
+
             UiAction::ExportVisio => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Visio drawing", &["vsdx"])
@@ -1696,6 +1736,29 @@ impl App {
 
             UiAction::SelectLibrary(library) => self.view.library = library,
             UiAction::FocusPaletteSearch => self.view.palette_search_focused = true,
+
+            UiAction::FocusCommentField => {
+                self.view.comment_edit_focused = true;
+            }
+
+            UiAction::AddComment => {
+                let text = std::mem::take(&mut self.view.comment_edit);
+                self.view.comment_edit_focused = false;
+                // The author is whoever the machine says is logged in. It is
+                // a label on a note, not a claim anyone is checking.
+                let author = std::env::var("USER")
+                    .or_else(|_| std::env::var("USERNAME"))
+                    .unwrap_or_default();
+                self.editor.add_comment(&text, &author);
+            }
+
+            UiAction::SetCommentResolved(id, resolved) => {
+                self.editor.set_comment_resolved(&id, resolved);
+            }
+
+            UiAction::DeleteComment(id) => {
+                self.editor.delete_comment(&id);
+            }
 
             UiAction::FocusLinkField => {
                 self.view.link_edit = match self.editor.selection_link() {
@@ -1979,6 +2042,16 @@ impl App {
     /// One place does this, so a preference cannot be read from the settings
     /// in one spot and from a stale copy in another.
     /// Mirrors the stored library into the view the chrome reads.
+    /// Reads the open document's revisions into the view the sheet draws.
+    fn refresh_revisions(&mut self) {
+        self.view.revisions = self
+            .editor
+            .revisions()
+            .iter()
+            .map(|r| (r.when(), r.summary()))
+            .collect();
+    }
+
     fn sync_library_view(&mut self) {
         self.view.favorites = self.user_library.favorite_types();
         self.view.saved_templates =

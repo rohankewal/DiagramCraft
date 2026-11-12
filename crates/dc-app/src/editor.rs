@@ -283,6 +283,11 @@ pub struct Editor {
     pub attach_target: Option<String>,
     /// Connection points currently offered on screen, in document units.
     pub ports: Vec<Point>,
+    /// Shapes with an unresolved comment, refreshed when comments change.
+    pub commented: Vec<String>,
+    /// Whether saving puts a copy aside for the revision history. Off for a
+    /// headless render, which should leave no trace behind it.
+    pub keep_revisions: bool,
     /// Quick-connect arrows currently offered, in document units.
     pub quick_connect: Vec<Point>,
     /// Set while a gesture is recording itself as one undo step.
@@ -332,6 +337,8 @@ impl Editor {
             hovered: None,
             attach_target: None,
             ports: Vec::new(),
+            commented: Vec::new(),
+            keep_revisions: true,
             quick_connect: Vec::new(),
             in_compound_change: false,
             path: None,
@@ -428,6 +435,7 @@ impl Editor {
             marquee,
             snap_guides: &self.guides,
             placed_guides: self.page().guides(),
+            commented: &self.commented,
             pending_connector,
             ports: &self.ports,
             quick_connect: &self.quick_connect,
@@ -480,6 +488,7 @@ impl Editor {
     }
 
     fn after_history_change(&mut self) {
+        self.refresh_commented();
         self.dirty = true;
         self.ensure_page_exists();
         self.page_index = self
@@ -555,6 +564,7 @@ impl Editor {
         self.dirty = false;
         self.history.clear();
         self.drag = None;
+        self.refresh_commented();
 
         // The status bar is narrow, so report the file name rather than the
         // whole path, which would overflow it.
@@ -665,8 +675,72 @@ impl Editor {
         self.package.write_path(path)?;
         self.path = Some(path.to_path_buf());
         self.dirty = false;
+
+        // A copy is put aside for the revision history. Failing to keep one
+        // is not a reason to report the save as failed — the document is on
+        // disk either way — so it is logged and passed over.
+        if self.keep_revisions {
+            if let Some(root) = crate::revisions::default_root() {
+                if let Err(e) = crate::revisions::record(
+                    &root,
+                    path,
+                    &self.package.document,
+                    crate::revisions::DEFAULT_LIMIT,
+                ) {
+                    log::warn!("could not record a revision: {e}");
+                }
+            }
+        }
+
         self.status = format!("Saved {}", file_label(path));
         Ok(())
+    }
+
+    /// Forgets every revision of the open document.
+    pub fn clear_revisions(&mut self) {
+        let (Some(root), Some(path)) = (crate::revisions::default_root(), self.path.as_ref())
+        else {
+            return;
+        };
+        self.status = match crate::revisions::clear(&root, path) {
+            Ok(()) => "Cleared the revision history".into(),
+            Err(e) => format!("Could not clear the history: {e}"),
+        };
+    }
+
+    /// The revisions kept for the open document.
+    pub fn revisions(&self) -> Vec<crate::revisions::Revision> {
+        let (Some(root), Some(path)) = (crate::revisions::default_root(), self.path.as_ref())
+        else {
+            return Vec::new();
+        };
+        crate::revisions::load(&root, path).revisions
+    }
+
+    /// Puts the document back to a revision.
+    ///
+    /// Restoring is an ordinary change, so it joins the undo stack: changing
+    /// one's mind about going back should not need the history again.
+    pub fn restore_revision(&mut self, index: usize) -> bool {
+        let (Some(root), Some(path)) = (crate::revisions::default_root(), self.path.clone())
+        else {
+            return false;
+        };
+        let Some(revision) = crate::revisions::load(&root, &path).revisions.get(index).cloned()
+        else {
+            return false;
+        };
+        let Some(document) = crate::revisions::read(&root, &path, &revision) else {
+            self.status = "That revision could not be read".into();
+            return false;
+        };
+
+        self.begin_change();
+        self.package.document = document;
+        self.page_index = self.page_index.min(self.package.document.pages.len().saturating_sub(1));
+        self.clear_selection();
+        self.status = format!("Restored the revision from {}", revision.when());
+        true
     }
 
     /// Saves to the current path, if there is one.
@@ -3208,6 +3282,105 @@ impl Editor {
         total
     }
 
+    // -------------------------------------------------------------- comments
+
+    /// Keeps the canvas marks in step with the comments.
+    ///
+    /// Derived rather than maintained by hand at each call site, so a mark
+    /// can never outlive the comment that put it there.
+    fn refresh_commented(&mut self) {
+        self.commented = self
+            .package
+            .document
+            .comments
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|c| !c.resolved)
+            .filter_map(|c| c.shape_id.clone())
+            .collect();
+    }
+
+    /// Every comment on the document.
+    pub fn comments(&self) -> &[dc_model::Comment] {
+        self.package.document.comments.as_deref().unwrap_or(&[])
+    }
+
+    /// Comments that have not been dealt with.
+    pub fn open_comments(&self) -> Vec<&dc_model::Comment> {
+        self.comments().iter().filter(|c| !c.resolved).collect()
+    }
+
+    /// Leaves a comment, on the selected shape when there is one.
+    pub fn add_comment(&mut self, text: &str, author: &str) -> Option<String> {
+        let text = text.trim();
+        if text.is_empty() {
+            self.status = "A comment needs something in it".into();
+            return None;
+        }
+
+        let id = self.package.document.fresh_id("comment");
+        let mut comment = dc_model::Comment::new(&id, text);
+        comment.author = author.trim().to_string();
+        if let Some(shape) = self.single_selected_id() {
+            comment = comment.on_shape(shape);
+        }
+
+        self.begin_change();
+        self.package
+            .document
+            .comments
+            .get_or_insert_with(Vec::new)
+            .push(comment);
+        self.refresh_commented();
+        self.status = "Added a comment".into();
+        Some(id)
+    }
+
+    /// Marks a comment dealt with, or reopens it.
+    pub fn set_comment_resolved(&mut self, id: &str, resolved: bool) -> bool {
+        let found = self
+            .comments()
+            .iter()
+            .position(|c| c.id == id)
+            .filter(|&i| self.comments()[i].resolved != resolved);
+        let Some(index) = found else {
+            return false;
+        };
+
+        self.begin_change();
+        if let Some(comments) = self.package.document.comments.as_mut() {
+            comments[index].resolved = resolved;
+        }
+        self.refresh_commented();
+        self.status = if resolved {
+            "Resolved the comment".into()
+        } else {
+            "Reopened the comment".into()
+        };
+        true
+    }
+
+    /// Removes a comment outright.
+    ///
+    /// Resolving is the ordinary way to finish with one, since it keeps the
+    /// record; deleting is for a comment left by mistake.
+    pub fn delete_comment(&mut self, id: &str) -> bool {
+        let Some(index) = self.comments().iter().position(|c| c.id == id) else {
+            return false;
+        };
+        self.begin_change();
+        if let Some(comments) = self.package.document.comments.as_mut() {
+            comments.remove(index);
+            if comments.is_empty() {
+                self.package.document.comments = None;
+            }
+        }
+        self.refresh_commented();
+        self.status = "Deleted the comment".into();
+        true
+    }
+
     // ---------------------------------------------------------------- guides
 
     /// The guides on the current page.
@@ -4734,6 +4907,110 @@ mod tests {
             .into_iter()
             .map(|entry| (entry.key, entry.value))
             .collect()
+    }
+
+    #[test]
+    fn a_comment_lands_on_the_selected_shape() {
+        let mut e = editor_with_two_shapes();
+        let id = e.page().shapes()[0].id.clone();
+        e.selection = vec![id.clone()];
+
+        e.add_comment("Is this still needed?", "sam").unwrap();
+        let comments = e.comments();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].shape_id.as_deref(), Some(id.as_str()));
+        assert_eq!(comments[0].author, "sam");
+        assert!(!comments[0].resolved);
+        assert_eq!(e.commented, vec![id.clone()], "the shape should be marked");
+    }
+
+    #[test]
+    fn a_comment_with_nothing_selected_is_about_the_page() {
+        let mut e = editor_with_two_shapes();
+        e.add_comment("Needs a title", "").unwrap();
+        assert!(e.comments()[0].shape_id.is_none());
+    }
+
+    #[test]
+    fn an_empty_comment_is_refused() {
+        let mut e = editor_with_two_shapes();
+        assert!(e.add_comment("   ", "sam").is_none());
+        assert!(e.comments().is_empty());
+    }
+
+    #[test]
+    fn resolving_keeps_the_comment_but_clears_the_mark() {
+        let mut e = editor_with_two_shapes();
+        let shape = e.page().shapes()[0].id.clone();
+        e.selection = vec![shape.clone()];
+        let id = e.add_comment("Check this", "sam").unwrap();
+
+        assert!(e.set_comment_resolved(&id, true));
+        assert_eq!(e.comments().len(), 1, "the record is kept");
+        assert!(e.comments()[0].resolved);
+        assert!(e.open_comments().is_empty());
+        assert!(e.commented.is_empty(), "the mark should go");
+
+        assert!(e.set_comment_resolved(&id, false), "and it can be reopened");
+        assert_eq!(e.commented, vec![shape.clone()]);
+    }
+
+    #[test]
+    fn resolving_something_already_resolved_changes_nothing() {
+        let mut e = editor_with_two_shapes();
+        let id = e.add_comment("Check this", "sam").unwrap();
+        assert!(e.set_comment_resolved(&id, true));
+        assert!(!e.set_comment_resolved(&id, true), "no second undo step for a no-op");
+    }
+
+    #[test]
+    fn deleting_removes_a_comment_outright() {
+        let mut e = editor_with_two_shapes();
+        let id = e.add_comment("Mistake", "sam").unwrap();
+        assert!(e.delete_comment(&id));
+        assert!(e.comments().is_empty());
+        assert!(!e.delete_comment(&id), "and deleting it again does nothing");
+    }
+
+    #[test]
+    fn comments_are_one_undo_step_each() {
+        let mut e = editor_with_two_shapes();
+        let id = e.add_comment("Check this", "sam").unwrap();
+        e.set_comment_resolved(&id, true);
+        assert!(e.comments()[0].resolved);
+
+        e.undo();
+        assert!(!e.comments()[0].resolved, "undo reopens it");
+        e.undo();
+        assert!(e.comments().is_empty(), "and again takes the comment back");
+    }
+
+    #[test]
+    fn the_canvas_marks_survive_an_undo() {
+        let mut e = editor_with_two_shapes();
+        let shape = e.page().shapes()[0].id.clone();
+        e.selection = vec![shape.clone()];
+        e.add_comment("Check this", "sam").unwrap();
+        assert_eq!(e.commented, vec![shape.clone()]);
+
+        e.undo();
+        assert!(
+            e.commented.is_empty(),
+            "a mark must not outlive the comment that put it there"
+        );
+    }
+
+    #[test]
+    fn comments_survive_a_round_trip_through_the_document() {
+        let mut e = editor_with_two_shapes();
+        let shape = e.page().shapes()[0].id.clone();
+        e.selection = vec![shape];
+        e.add_comment("Still needed?", "sam").unwrap();
+
+        let json = serde_json::to_string(&e.package.document).unwrap();
+        assert!(json.contains("dcComments"), "written under its namespaced key");
+        let back: dc_model::Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.comments, e.package.document.comments);
     }
 
     #[test]
