@@ -78,6 +78,8 @@ pub struct App {
     metrics: Metrics,
     /// Interface state the menus reflect: grid, theme, palette library.
     view: ViewState,
+    /// The shapes starred and templates saved by this person.
+    user_library: crate::library::UserLibrary,
 
     /// The menu currently dropped down, by index.
     open_menu: Option<usize>,
@@ -140,6 +142,7 @@ impl App {
         let mut app = App::empty();
         app.view.settings = settings;
         app.apply_settings();
+        app.sync_library_view();
         app
     }
 
@@ -165,6 +168,7 @@ impl App {
                 ..Metrics::default()
             },
             view: ViewState::default(),
+            user_library: crate::library::UserLibrary::load(),
             open_menu: None,
             context_menu: None,
             #[cfg(target_os = "macos")]
@@ -677,6 +681,22 @@ impl App {
             return Some(false);
         }
         None
+    }
+
+    /// Writes the starred shapes and saved templates back to disk.
+    ///
+    /// Guarded by the same flag the settings are, so a headless preview does
+    /// not scribble on the real library.
+    fn persist_library(&mut self) {
+        self.view.favorites = self.user_library.favorite_types();
+        self.view.saved_templates =
+            self.user_library.templates.iter().map(|t| t.name.clone()).collect();
+        if self.persist_settings {
+            if let Err(e) = self.user_library.save() {
+                log::warn!("could not save the library: {e}");
+                self.editor.status = format!("Could not save the library: {e}");
+            }
+        }
     }
 
     fn on_pointer_down(&mut self, button: MouseButton) {
@@ -1415,11 +1435,53 @@ impl App {
             UiAction::OpenTemplateGallery => self.view.template_gallery_open = true,
             UiAction::CloseTemplateGallery => self.view.template_gallery_open = false,
             UiAction::NewFromTemplate(index) => {
+                // One index addresses both lists: the built-in templates
+                // first, then the saved ones after them.
+                let built_in = crate::templates::ALL.len();
                 if let Some(t) = crate::templates::ALL.get(index) {
                     self.editor.new_document_from_template((t.build)(), t.name);
                     self.sync_images();
+                } else if let Some(saved) = self.user_library.templates.get(index - built_in) {
+                    let (document, name) = (saved.document.clone(), saved.name.clone());
+                    self.editor.new_document_from_template(document, &name);
+                    self.sync_images();
                 }
                 self.view.template_gallery_open = false;
+            }
+
+            UiAction::DeleteSavedTemplate(index) => {
+                if self.user_library.remove_template(index) {
+                    self.persist_library();
+                    self.editor.status = "Deleted the saved template".into();
+                }
+            }
+
+            UiAction::SavePageAsTemplate => {
+                // Named after the page, which is already editable by
+                // double-clicking its tab — so no dialog has to ask.
+                let name = self.editor.page().title.clone();
+                if name.trim().is_empty() {
+                    self.editor.status = "Give the page a name first".into();
+                } else {
+                    let document = self.editor.package.document.clone();
+                    self.user_library.save_template(&name, document);
+                    self.persist_library();
+                    self.editor.status = format!("Saved \"{name}\" as a template");
+                }
+            }
+
+            UiAction::ToggleFavoriteShape => {
+                let Some(shape_type) = self.editor.selected_shape_type() else {
+                    self.editor.status = "Select a shape to star it".into();
+                    return;
+                };
+                let starred = self.user_library.toggle_favorite(&shape_type);
+                self.persist_library();
+                self.editor.status = if starred {
+                    format!("Starred {}", shape_type.display_name())
+                } else {
+                    format!("Unstarred {}", shape_type.display_name())
+                };
             }
 
             UiAction::Open => {
@@ -1795,6 +1857,13 @@ impl App {
     ///
     /// One place does this, so a preference cannot be read from the settings
     /// in one spot and from a stale copy in another.
+    /// Mirrors the stored library into the view the chrome reads.
+    fn sync_library_view(&mut self) {
+        self.view.favorites = self.user_library.favorite_types();
+        self.view.saved_templates =
+            self.user_library.templates.iter().map(|t| t.name.clone()).collect();
+    }
+
     fn apply_settings(&mut self) {
         let s = &self.view.settings;
 

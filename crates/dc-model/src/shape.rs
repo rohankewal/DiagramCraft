@@ -102,6 +102,74 @@ string_enum! {
         // AWS 2024, Azure 2021/2024, and GCP 2021 libraries.
         NamedShape => "namedShape",
         NamedContainer => "namedContainer",
+
+        // ------------------------------------------------------------------
+        // Beyond the published libraries.
+        //
+        // The notations below — UML, ERD, network, wireframe — are standards
+        // or conventions in their own right, but the Standard Import format
+        // publishes no types for them. Their strings are prefixed `dc` so
+        // they cannot collide with a library Lucid may publish later. A file
+        // using them round-trips here; another tool will carry them through
+        // as unrecognised types rather than drawing them.
+
+        // UML.
+        UmlClass => "dcUmlClass",
+        UmlInterface => "dcUmlInterface",
+        UmlPackage => "dcUmlPackage",
+        UmlActor => "dcUmlActor",
+        UmlUseCase => "dcUmlUseCase",
+        UmlLifeline => "dcUmlLifeline",
+        UmlActivation => "dcUmlActivation",
+        UmlComponent => "dcUmlComponent",
+        UmlNode => "dcUmlNode",
+        UmlState => "dcUmlState",
+        UmlInitialState => "dcUmlInitialState",
+        UmlFinalState => "dcUmlFinalState",
+        UmlFork => "dcUmlFork",
+
+        // Entity-relationship, which pairs with the crow's-foot endpoints
+        // the published format already describes.
+        ErdEntity => "dcErdEntity",
+        ErdWeakEntity => "dcErdWeakEntity",
+        ErdRelationship => "dcErdRelationship",
+        ErdWeakRelationship => "dcErdWeakRelationship",
+        ErdAttribute => "dcErdAttribute",
+        ErdMultivaluedAttribute => "dcErdMultivaluedAttribute",
+        ErdDerivedAttribute => "dcErdDerivedAttribute",
+
+        // Network.
+        NetServer => "dcNetServer",
+        NetRouter => "dcNetRouter",
+        NetSwitch => "dcNetSwitch",
+        NetFirewall => "dcNetFirewall",
+        NetWorkstation => "dcNetWorkstation",
+        NetLaptop => "dcNetLaptop",
+        NetMobile => "dcNetMobile",
+        NetPrinter => "dcNetPrinter",
+        NetRack => "dcNetRack",
+        NetWireless => "dcNetWireless",
+
+        // Wireframe and mockup.
+        WireBrowser => "dcWireBrowser",
+        WirePhone => "dcWirePhone",
+        WireButton => "dcWireButton",
+        WireTextField => "dcWireTextField",
+        WireCheckbox => "dcWireCheckbox",
+        WireRadio => "dcWireRadio",
+        WireDropdown => "dcWireDropdown",
+        WireImage => "dcWireImage",
+        WireNavBar => "dcWireNavBar",
+        WireSlider => "dcWireSlider",
+        WireToggle => "dcWireToggle",
+
+        // Charts and other diagram furniture.
+        ChartVennTwo => "dcChartVennTwo",
+        ChartVennThree => "dcChartVennThree",
+        ChartMatrix => "dcChartMatrix",
+        ChartSitemapPage => "dcChartSitemapPage",
+        ChartTimeline => "dcChartTimeline",
+        ChartMilestone => "dcChartMilestone",
     }
 }
 
@@ -120,6 +188,19 @@ pub enum ShapeLibrary {
     /// AWS, Azure, and GCP, which the format expresses as `namedShape` and
     /// `namedContainer` with a `className`.
     Cloud,
+    /// Standard UML notation, which the published format does not cover.
+    Uml,
+    /// Entity-relationship entities and attributes.
+    Erd,
+    /// Network and infrastructure equipment.
+    Network,
+    /// Interface wireframing and mockups.
+    Wireframe,
+    /// Venn, matrix, sitemap and timeline furniture.
+    Chart,
+    /// Shapes someone starred. Its contents come from their own library
+    /// rather than from a fixed list, so `types()` is empty here.
+    Favorites,
     /// A type string no published library declares.
     Unsupported,
 }
@@ -135,6 +216,12 @@ impl ShapeLibrary {
         ShapeLibrary::Table,
         ShapeLibrary::Lucidspark,
         ShapeLibrary::Cloud,
+        ShapeLibrary::Uml,
+        ShapeLibrary::Erd,
+        ShapeLibrary::Network,
+        ShapeLibrary::Wireframe,
+        ShapeLibrary::Chart,
+        ShapeLibrary::Favorites,
     ];
 
     pub fn display_name(self) -> &'static str {
@@ -147,6 +234,12 @@ impl ShapeLibrary {
             ShapeLibrary::Table => "Table",
             ShapeLibrary::Lucidspark => "Lucidspark",
             ShapeLibrary::Cloud => "AWS / Azure / GCP",
+            ShapeLibrary::Uml => "UML",
+            ShapeLibrary::Erd => "Entity Relationship",
+            ShapeLibrary::Network => "Network",
+            ShapeLibrary::Wireframe => "Wireframe",
+            ShapeLibrary::Chart => "Charts",
+            ShapeLibrary::Favorites => "My Shapes",
             ShapeLibrary::Unsupported => "Other",
         }
     }
@@ -162,6 +255,12 @@ impl ShapeLibrary {
             ShapeLibrary::Table => "Table",
             ShapeLibrary::Lucidspark => "Spark",
             ShapeLibrary::Cloud => "Cloud",
+            ShapeLibrary::Uml => "UML",
+            ShapeLibrary::Erd => "ERD",
+            ShapeLibrary::Network => "Net",
+            ShapeLibrary::Wireframe => "Wire",
+            ShapeLibrary::Chart => "Chart",
+            ShapeLibrary::Favorites => "Mine",
             ShapeLibrary::Unsupported => "Other",
         }
     }
@@ -235,6 +334,24 @@ impl ShapeType {
             Table => ShapeLibrary::Table,
 
             NamedShape | NamedContainer => ShapeLibrary::Cloud,
+
+            UmlClass | UmlInterface | UmlPackage | UmlActor | UmlUseCase | UmlLifeline
+            | UmlActivation | UmlComponent | UmlNode | UmlState | UmlInitialState
+            | UmlFinalState | UmlFork => ShapeLibrary::Uml,
+
+            ErdEntity | ErdWeakEntity | ErdRelationship | ErdWeakRelationship
+            | ErdAttribute | ErdMultivaluedAttribute | ErdDerivedAttribute => ShapeLibrary::Erd,
+
+            NetServer | NetRouter | NetSwitch | NetFirewall | NetWorkstation | NetLaptop
+            | NetMobile | NetPrinter | NetRack | NetWireless => ShapeLibrary::Network,
+
+            WireBrowser | WirePhone | WireButton | WireTextField | WireCheckbox | WireRadio
+            | WireDropdown | WireImage | WireNavBar | WireSlider | WireToggle => {
+                ShapeLibrary::Wireframe
+            }
+
+            ChartVennTwo | ChartVennThree | ChartMatrix | ChartSitemapPage | ChartTimeline
+            | ChartMilestone => ShapeLibrary::Chart,
 
             Other(_) => ShapeLibrary::Unsupported,
 
@@ -365,6 +482,58 @@ impl ShapeType {
             NamedShape => "Cloud Icon",
             NamedContainer => "Cloud Container",
 
+            UmlClass => "Class",
+            UmlInterface => "Interface",
+            UmlPackage => "Package",
+            UmlActor => "Actor",
+            UmlUseCase => "Use Case",
+            UmlLifeline => "Lifeline",
+            UmlActivation => "Activation",
+            UmlComponent => "Component",
+            UmlNode => "Node",
+            UmlState => "State",
+            UmlInitialState => "Initial State",
+            UmlFinalState => "Final State",
+            UmlFork => "Fork / Join",
+
+            ErdEntity => "Entity",
+            ErdWeakEntity => "Weak Entity",
+            ErdRelationship => "Relationship",
+            ErdWeakRelationship => "Weak Relationship",
+            ErdAttribute => "Attribute",
+            ErdMultivaluedAttribute => "Multivalued",
+            ErdDerivedAttribute => "Derived",
+
+            NetServer => "Server",
+            NetRouter => "Router",
+            NetSwitch => "Switch",
+            NetFirewall => "Firewall",
+            NetWorkstation => "Workstation",
+            NetLaptop => "Laptop",
+            NetMobile => "Mobile",
+            NetPrinter => "Printer",
+            NetRack => "Rack",
+            NetWireless => "Access Point",
+
+            WireBrowser => "Browser",
+            WirePhone => "Phone",
+            WireButton => "Button",
+            WireTextField => "Text Field",
+            WireCheckbox => "Checkbox",
+            WireRadio => "Radio",
+            WireDropdown => "Dropdown",
+            WireImage => "Image Block",
+            WireNavBar => "Nav Bar",
+            WireSlider => "Slider",
+            WireToggle => "Toggle",
+
+            ChartVennTwo => "Venn (2)",
+            ChartVennThree => "Venn (3)",
+            ChartMatrix => "2×2 Matrix",
+            ChartSitemapPage => "Page",
+            ChartTimeline => "Timeline",
+            ChartMilestone => "Milestone",
+
             Other(s) => s,
         }
     }
@@ -411,6 +580,49 @@ impl ShapeType {
 
             NamedShape => (80.0, 80.0),
             NamedContainer => (280.0, 200.0),
+
+            // A class box needs room for three compartments; a lifeline is
+            // tall because its dashed tail is most of the shape.
+            UmlClass => (160.0, 120.0),
+            UmlInterface => (160.0, 120.0),
+            UmlPackage => (180.0, 120.0),
+            UmlActor => (40.0, 80.0),
+            UmlUseCase => (140.0, 70.0),
+            UmlLifeline => (120.0, 220.0),
+            UmlActivation => (16.0, 120.0),
+            UmlComponent => (160.0, 80.0),
+            UmlNode => (150.0, 100.0),
+            UmlState => (140.0, 70.0),
+            UmlInitialState | UmlFinalState => (28.0, 28.0),
+            UmlFork => (160.0, 10.0),
+
+            ErdEntity | ErdWeakEntity => (160.0, 110.0),
+            ErdRelationship | ErdWeakRelationship => (130.0, 80.0),
+            ErdAttribute | ErdMultivaluedAttribute | ErdDerivedAttribute => (120.0, 55.0),
+
+            NetServer | NetRack => (80.0, 110.0),
+            NetRouter | NetSwitch | NetWireless => (90.0, 60.0),
+            NetFirewall => (100.0, 70.0),
+            NetWorkstation | NetPrinter => (100.0, 85.0),
+            NetLaptop => (110.0, 75.0),
+            NetMobile => (50.0, 90.0),
+
+            WireBrowser => (320.0, 220.0),
+            WirePhone => (160.0, 300.0),
+            WireButton => (110.0, 36.0),
+            WireTextField | WireDropdown => (180.0, 34.0),
+            WireCheckbox | WireRadio => (18.0, 18.0),
+            WireImage => (180.0, 120.0),
+            WireNavBar => (320.0, 40.0),
+            WireSlider => (180.0, 20.0),
+            WireToggle => (46.0, 24.0),
+
+            ChartVennTwo => (220.0, 140.0),
+            ChartVennThree => (200.0, 180.0),
+            ChartMatrix => (220.0, 220.0),
+            ChartSitemapPage => (110.0, 70.0),
+            ChartTimeline => (320.0, 40.0),
+            ChartMilestone => (36.0, 36.0),
 
             _ => (120.0, 60.0),
         }

@@ -14,6 +14,7 @@ mod editor;
 mod export;
 mod history;
 mod icon;
+mod library;
 mod menu;
 #[cfg(target_os = "macos")]
 mod native_menu;

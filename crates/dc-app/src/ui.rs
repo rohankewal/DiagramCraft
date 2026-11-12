@@ -36,6 +36,12 @@ pub enum UiAction {
     CloseTemplateGallery,
     /// Replaces the document with a template, by index into `templates::ALL`.
     NewFromTemplate(usize),
+    /// Forgets a saved template, by index into the saved list.
+    DeleteSavedTemplate(usize),
+    /// Stars or unstars the selected shape's type.
+    ToggleFavoriteShape,
+    /// Saves the current page as a template, named after the page.
+    SavePageAsTemplate,
     Open,
     ImportVsdx,
     Save,
@@ -636,7 +642,7 @@ impl Chrome {
         // The template gallery is modal, the same way settings is.
         let template_gallery = view
             .template_gallery_open
-            .then(|| build_template_gallery(&layout, &mut regions));
+            .then(|| build_template_gallery(&layout, view, &mut regions));
 
         // The settings screen covers everything, menus included.
         let settings_sheet = view
@@ -1848,7 +1854,14 @@ fn build_palette(layout: &Layout, editor: &Editor, view: &ViewState, out: &mut V
     });
     y += 22.0;
 
-    build_shape_tiles(view.library.types().into_iter(), x0, panel.y1, y, columns, editor, out);
+    // Every library but My Shapes has a fixed list; that one comes from
+    // what the person starred.
+    let shapes: Vec<ShapeType> = if view.library == ShapeLibrary::Favorites {
+        view.favorites.clone()
+    } else {
+        view.library.types()
+    };
+    build_shape_tiles(shapes.into_iter(), x0, panel.y1, y, columns, editor, out);
 }
 
 /// Lays shape tiles out in a grid, stopping once they would run past
@@ -2846,7 +2859,7 @@ const TEMPLATE_GALLERY_WIDTH: f64 = 440.0;
 /// Lays out the "New from Template" gallery as a modal sheet, the same
 /// construction `build_settings` uses: a scrim that closes it on a miss,
 /// and a sheet sized to its content and clamped to the window.
-fn build_template_gallery(layout: &Layout, out: &mut Vec<Region>) -> Rect {
+fn build_template_gallery(layout: &Layout, view: &ViewState, out: &mut Vec<Region>) -> Rect {
     let window = Rect::new(0.0, 0.0, layout.viewport.x, layout.viewport.y);
     out.push(Region {
         rect: window,
@@ -2860,7 +2873,12 @@ fn build_template_gallery(layout: &Layout, out: &mut Vec<Region>) -> Rect {
 
     let width = TEMPLATE_GALLERY_WIDTH.clamp(1.0, layout.viewport.x - 40.0);
     let content_height =
-        16.0 + 24.0 + 10.0 + crate::templates::ALL.len() as f64 * (TEMPLATE_ROW + 8.0) + 16.0 + ROW_HEIGHT + 16.0;
+        16.0 + 24.0 + 10.0
+            + (crate::templates::ALL.len() + view.saved_templates.len()) as f64
+                * (TEMPLATE_ROW + 8.0)
+            + 16.0
+            + ROW_HEIGHT
+            + 16.0;
     let height = content_height.clamp(1.0, layout.viewport.y - 40.0);
     let sheet = Rect::from_center_size(
         kurbo::Point::new(layout.viewport.x / 2.0, layout.viewport.y / 2.0),
@@ -2922,6 +2940,51 @@ fn build_template_gallery(layout: &Layout, out: &mut Vec<Region>) -> Rect {
             action: UiAction::NoOp,
             label: t.description.to_string(),
             kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        y += TEMPLATE_ROW + 8.0;
+    }
+
+    // Saved templates follow the built-in ones, numbered after them so one
+    // index addresses both lists.
+    for (i, name) in view.saved_templates.iter().enumerate() {
+        if y + TEMPLATE_ROW > content_limit {
+            break;
+        }
+        out.push(Region {
+            rect: Rect::new(x0, y, x1, y + TEMPLATE_ROW),
+            action: UiAction::NewFromTemplate(crate::templates::ALL.len() + i),
+            label: String::new(),
+            kind: RegionKind::Button,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        out.push(Region {
+            rect: Rect::new(x0 + 12.0, y + 8.0, x1 - 12.0, y + 28.0),
+            action: UiAction::NoOp,
+            label: name.clone(),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        out.push(Region {
+            rect: Rect::new(x0 + 12.0, y + 30.0, x1 - 100.0, y + 48.0),
+            action: UiAction::NoOp,
+            label: "Saved from a page of your own.".into(),
+            kind: RegionKind::Heading,
+            selected: false,
+            emphasis: Emphasis::default(),
+            label_size: None,
+        });
+        out.push(Region {
+            rect: Rect::new(x1 - 92.0, y + 26.0, x1 - 12.0, y + 50.0),
+            action: UiAction::DeleteSavedTemplate(i),
+            label: "Delete".into(),
+            kind: RegionKind::Button,
             selected: false,
             emphasis: Emphasis::default(),
             label_size: None,

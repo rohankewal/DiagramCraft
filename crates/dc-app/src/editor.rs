@@ -1030,6 +1030,25 @@ impl Editor {
         self.status = format!("Fitted {fitted} container(s) to their contents");
     }
 
+    /// The type of the one selected shape, when exactly one is selected.
+    ///
+    /// Starring is about a kind of shape, not about a particular one, so a
+    /// mixed selection has no answer to give.
+    pub fn selected_shape_type(&self) -> Option<ShapeType> {
+        let mut found: Option<ShapeType> = None;
+        for id in &self.selection {
+            let Some(shape) = self.page().shape(id) else {
+                continue;
+            };
+            match &found {
+                Some(t) if *t != shape.shape_type => return None,
+                Some(_) => {}
+                None => found = Some(shape.shape_type.clone()),
+            }
+        }
+        found
+    }
+
     /// Whether the selection holds a container, which is what the menu asks.
     pub fn selection_has_container(&self) -> bool {
         self.selection.iter().any(|id| {

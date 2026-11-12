@@ -4,6 +4,7 @@
 //! This crate is pure computation over [`dc_model`] types with no rendering
 //! backend, which keeps it testable without a GPU.
 
+pub mod extended;
 pub mod layout;
 pub mod markers;
 pub mod route;

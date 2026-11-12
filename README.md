@@ -56,6 +56,16 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - All 68 published shape types across eight libraries: Standard, Shapes,
   Flowchart, Containers, BPMN 2.0, Table, Lucidspark, and the AWS, Azure and
   GCP cloud libraries
+- Five more the format does not publish, drawn from their own notations:
+  UML (class, interface, package, actor, use case, lifeline, activation,
+  component, node, state, fork), entity-relationship (entity, weak entity,
+  relationship, attribute and its variants), network (server, router,
+  switch, firewall, workstation, laptop, mobile, printer, rack, access
+  point), wireframe (browser, phone, button, field, checkbox, radio,
+  dropdown, image, nav bar, slider, toggle), and charts (Venn, 2×2 matrix,
+  sitemap page, timeline, milestone)
+- Star any shape into My Shapes, and save a page as a reusable template —
+  both kept beside the settings, so they outlive the document
 - Fill, stroke, weight, dash style, corner rounding, opacity, z-order
 - Image fills and image blocks, clipped to the shape outline
 
@@ -225,7 +235,7 @@ logic is likewise separated from the window layer: every tool, gesture,
 command, and menu is tested without opening a window.
 
 ```sh
-cargo test --workspace     # 1052 tests
+cargo test --workspace     # 1063 tests
 ```
 
 ## Scope
@@ -246,6 +256,12 @@ Known limits:
   colours onto the shapes, so the canvas, SVG, and PDF all show the same
   thing without any of them needing to know rules exist. Changing the data
   afterwards does not recolour anything until the rules are run again.
+- **Five shape libraries are extensions.** UML, ERD, network, wireframe and
+  chart shapes have no counterpart in the Standard Import format, so their
+  type strings are prefixed `dc`. A document using them round-trips here
+  perfectly — the format already carries types a reader does not recognise —
+  but another tool will show them as unknown shapes rather than drawing
+  them. The eight published libraries are unaffected.
 - **Three fields are extensions.** A shape's lock, a page's guides, and the
   document's formatting rules have no published counterpart, so they are
   written under names of our own (`locked`, `dcGuides`, `dcFormatRules`).

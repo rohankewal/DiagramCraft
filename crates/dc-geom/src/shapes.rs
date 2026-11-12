@@ -9,6 +9,7 @@
 //! program's output.
 
 use dc_model::{RelPoint, Shape, ShapeType};
+use crate::extended;
 use kurbo::{Affine, BezPath, Ellipse, Insets, Point as KPoint, Rect, RoundedRect, Shape as _};
 
 /// Bezier control-point ratio that approximates a quarter ellipse.
@@ -41,7 +42,7 @@ pub struct ShapeGeometry {
 }
 
 impl ShapeGeometry {
-    fn closed(outline: BezPath) -> Self {
+    pub(crate) fn closed(outline: BezPath) -> Self {
         ShapeGeometry {
             outline,
             decoration: None,
@@ -51,25 +52,25 @@ impl ShapeGeometry {
         }
     }
 
-    fn with_decoration(mut self, decoration: BezPath) -> Self {
+    pub(crate) fn with_decoration(mut self, decoration: BezPath) -> Self {
         self.decoration = Some(decoration);
         self
     }
 
-    fn with_insets(mut self, insets: Insets) -> Self {
+    pub(crate) fn with_insets(mut self, insets: Insets) -> Self {
         self.text_insets = insets;
         self
     }
 
     /// Marks the outline as geometry only: present for bounds and hit testing,
     /// never painted.
-    fn unpainted(mut self) -> Self {
+    pub(crate) fn unpainted(mut self) -> Self {
         self.filled = false;
         self.stroked = false;
         self
     }
 
-    fn open(outline: BezPath) -> Self {
+    pub(crate) fn open(outline: BezPath) -> Self {
         ShapeGeometry {
             outline,
             decoration: None,
@@ -240,6 +241,60 @@ fn outline_for(shape: &Shape, x: f64, y: f64, w: f64, h: f64) -> ShapeGeometry {
             TitleBar::Top,
         ),
 
+        // The notations the published format does not cover, drawn from
+        // their own definitions in `extended`.
+        UmlClass => extended::uml_class(x, y, w, h),
+        UmlInterface => extended::uml_interface(x, y, w, h),
+        UmlPackage => extended::uml_package(x, y, w, h),
+        UmlActor => extended::uml_actor(x, y, w, h),
+        UmlUseCase => extended::uml_use_case(x, y, w, h),
+        UmlLifeline => extended::uml_lifeline(x, y, w, h),
+        UmlActivation => extended::uml_activation(x, y, w, h),
+        UmlComponent => extended::uml_component(x, y, w, h),
+        UmlNode => extended::uml_node(x, y, w, h),
+        UmlState => extended::uml_state(x, y, w, h),
+        UmlInitialState => extended::uml_initial_state(x, y, w, h),
+        UmlFinalState => extended::uml_final_state(x, y, w, h),
+        UmlFork => extended::uml_fork(x, y, w, h),
+
+        ErdEntity => extended::erd_entity(x, y, w, h),
+        ErdWeakEntity => extended::erd_weak_entity(x, y, w, h),
+        ErdRelationship => extended::erd_relationship(x, y, w, h),
+        ErdWeakRelationship => extended::erd_weak_relationship(x, y, w, h),
+        ErdAttribute => extended::erd_attribute(x, y, w, h),
+        ErdMultivaluedAttribute => extended::erd_multivalued_attribute(x, y, w, h),
+        ErdDerivedAttribute => extended::erd_derived_attribute(x, y, w, h),
+
+        NetServer => extended::net_server(x, y, w, h),
+        NetRouter => extended::net_router(x, y, w, h),
+        NetSwitch => extended::net_switch(x, y, w, h),
+        NetFirewall => extended::net_firewall(x, y, w, h),
+        NetWorkstation => extended::net_workstation(x, y, w, h),
+        NetLaptop => extended::net_laptop(x, y, w, h),
+        NetMobile => extended::net_mobile(x, y, w, h),
+        NetPrinter => extended::net_printer(x, y, w, h),
+        NetRack => extended::net_rack(x, y, w, h),
+        NetWireless => extended::net_wireless(x, y, w, h),
+
+        WireBrowser => extended::wire_browser(x, y, w, h),
+        WirePhone => extended::wire_phone(x, y, w, h),
+        WireButton => extended::wire_button(x, y, w, h),
+        WireTextField => extended::wire_text_field(x, y, w, h),
+        WireCheckbox => extended::wire_checkbox(x, y, w, h),
+        WireRadio => extended::wire_radio(x, y, w, h),
+        WireDropdown => extended::wire_dropdown(x, y, w, h),
+        WireImage => extended::wire_image(x, y, w, h),
+        WireNavBar => extended::wire_nav_bar(x, y, w, h),
+        WireSlider => extended::wire_slider(x, y, w, h),
+        WireToggle => extended::wire_toggle(x, y, w, h),
+
+        ChartVennTwo => extended::chart_venn_two(x, y, w, h),
+        ChartVennThree => extended::chart_venn_three(x, y, w, h),
+        ChartMatrix => extended::chart_matrix(x, y, w, h),
+        ChartSitemapPage => extended::chart_sitemap_page(x, y, w, h),
+        ChartTimeline => extended::chart_timeline(x, y, w, h),
+        ChartMilestone => extended::chart_milestone(x, y, w, h),
+
         // A type string no published library declares: draw a plain rectangle
         // so the shape is still visible, selectable, and saveable.
         Other(_) => ShapeGeometry::closed(rect_path(x, y, w, h)),
@@ -250,11 +305,11 @@ fn outline_for(shape: &Shape, x: f64, y: f64, w: f64, h: f64) -> ShapeGeometry {
 // Primitives
 // ---------------------------------------------------------------------------
 
-fn rect_path(x: f64, y: f64, w: f64, h: f64) -> BezPath {
+pub(crate) fn rect_path(x: f64, y: f64, w: f64, h: f64) -> BezPath {
     Rect::new(x, y, x + w, y + h).to_path(PATH_TOLERANCE)
 }
 
-fn rounded_path(x: f64, y: f64, w: f64, h: f64, radius: f64) -> BezPath {
+pub(crate) fn rounded_path(x: f64, y: f64, w: f64, h: f64, radius: f64) -> BezPath {
     let r = radius.clamp(0.0, w.min(h) / 2.0);
     if r <= 0.0 {
         return rect_path(x, y, w, h);
@@ -262,7 +317,7 @@ fn rounded_path(x: f64, y: f64, w: f64, h: f64, radius: f64) -> BezPath {
     RoundedRect::new(x, y, x + w, y + h, r).to_path(PATH_TOLERANCE)
 }
 
-fn polygon(points: &[(f64, f64)]) -> BezPath {
+pub(crate) fn polygon(points: &[(f64, f64)]) -> BezPath {
     let mut p = BezPath::new();
     if let Some(&(x0, y0)) = points.first() {
         p.move_to((x0, y0));
@@ -322,7 +377,7 @@ fn wave_x(path: &mut BezPath, from: (f64, f64), to: (f64, f64), amp: f64) {
     );
 }
 
-fn line(path: &mut BezPath, from: (f64, f64), to: (f64, f64)) {
+pub(crate) fn line(path: &mut BezPath, from: (f64, f64), to: (f64, f64)) {
     path.move_to(from);
     path.line_to(to);
 }
@@ -349,7 +404,7 @@ fn rounded_rect(shape: &Shape, x: f64, y: f64, w: f64, h: f64) -> ShapeGeometry 
     ShapeGeometry::closed(path)
 }
 
-fn ellipse_path_geo(x: f64, y: f64, w: f64, h: f64) -> ShapeGeometry {
+pub(crate) fn ellipse_path_geo(x: f64, y: f64, w: f64, h: f64) -> ShapeGeometry {
     let e = Ellipse::new(
         KPoint::new(x + w / 2.0, y + h / 2.0),
         (w / 2.0, h / 2.0),
@@ -1615,6 +1670,11 @@ mod tests {
         // rectangles, so each one must contribute at least one outline that a
         // plain rectangle's four segments cannot account for.
         for library in dc_model::ShapeLibrary::ALL {
+            // A library whose contents come from the person using it rather
+            // than from a fixed list has nothing here to assert about.
+            if library.types().is_empty() {
+                continue;
+            }
             let distinctive = library.types().iter().any(|t| {
                 let s = shape_of(t.clone());
                 let geo = geometry(&s);

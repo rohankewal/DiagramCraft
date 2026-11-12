@@ -58,6 +58,11 @@ pub struct ViewState {
     pub find_match_index: usize,
     /// Whether the "New from Template" gallery is showing.
     pub template_gallery_open: bool,
+    /// Shape types the person starred, which is what the My Shapes tab
+    /// offers. Carried here because the palette reads it every frame.
+    pub favorites: Vec<ShapeType>,
+    /// Names of the templates they saved, shown under the built-in ones.
+    pub saved_templates: Vec<String>,
 }
 
 /// The key a menu item's shortcut names.
@@ -323,6 +328,18 @@ fn insert_menu(editor: &Editor, view: &ViewState) -> Menu {
         MenuItem::new("Connector", "C", UiAction::SelectTool(Tool::Connector)),
         MenuItem::separator(),
         MenuItem::new("Image…", "", UiAction::InsertImage),
+        MenuItem::separator(),
+        MenuItem::check(
+            "Star Shape in My Shapes",
+            "",
+            UiAction::ToggleFavoriteShape,
+            editor
+                .selected_shape_type()
+                .is_some_and(|t| view.favorites.contains(&t)),
+        )
+        .enabled_when(editor.selected_shape_type().is_some()),
+        MenuItem::new("Save Page as Template", "", UiAction::SavePageAsTemplate)
+            .enabled_when(!editor.page().title.trim().is_empty()),
         MenuItem::separator(),
         MenuItem::new("Page", "", UiAction::AddPage),
         MenuItem::new("Duplicate Page", "", UiAction::DuplicatePage(editor.page_index))
