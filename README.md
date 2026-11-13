@@ -8,7 +8,7 @@ A desktop diagramming editor that reads and writes the Lucid Standard Import
 format. Flowcharts, org charts, network diagrams, and the rest — on macOS,
 Windows, and Linux, with no subscription and no account.
 
-![DiagramCraft editing a flowchart](docs/images/editor.png)
+![DiagramCraft editing a cross-functional flowchart](docs/images/editor.png)
 
 ## Why
 
@@ -178,10 +178,11 @@ the flags that put the editor into the state worth looking at — `--dark`,
 which is the point: the pictures cannot drift from the program, because the
 program draws them.
 
-Try the sample:
+Try the samples:
 
 ```sh
-cargo run --release -- samples/approval.lucid
+cargo run --release -- samples/fulfilment.lucid   # the one at the top
+cargo run --release -- samples/approval.lucid     # a single-page flowchart
 ```
 
 ### Interface
