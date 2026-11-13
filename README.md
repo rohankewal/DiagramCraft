@@ -17,7 +17,7 @@ open-source desktop option. The web tools are good but rented; the desktop tools
 are expensive or abandoned. The moat was never the drawing code — it was the
 file format, and that format is published.
 
-DiagramCraft is GPU-accelerated vector rendering in pure Rust: an 8.5 MB binary
+DiagramCraft is GPU-accelerated vector rendering in pure Rust: a 9.5 MB binary
 that opens instantly and does not ship a browser engine to draw rectangles.
 
 ## Status
@@ -44,6 +44,8 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - Lock a shape in place — it still selects, so it can be unlocked, but it
   refuses to move, resize, or be deleted
 - Rulers, and guides dragged off them that shapes snap to
+- A pen that draws a freehand stroke, kept as the published Lucidspark
+  drawing type rather than as something only this editor can read
 - Presentation mode: pages full-screen with the chrome gone, arrow keys or
   a clicker to step through
 - Revision history: every save keeps a copy, browsable and restorable long
@@ -51,29 +53,51 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - Comments that live in the document: leave one on a shape or the page,
   resolve it when it is dealt with, and it travels with the file
 
+![Rulers, guides, and the grid](docs/images/rulers.png)
+
+**Finding and organising**
+- Find and replace across the page's labels, stepping the view to each hit
+- Select every shape, every connector, or everything matching the selection's
+  fill, line colour, or shape type
+- A layers panel: show, hide, lock, add, delete, and move the selection onto
+  another layer
+- Right-click menus that change with what is under the pointer — a shape, the
+  bare canvas, or a page tab, which gets the commands for *that* page rather
+  than the one on screen
+
 **Text**
 - Edit labels in place: double-click a shape or connector, or press Enter
 - Caret, selection, word movement, and multi-line labels
 - Per-selection styling: bold, italic, underline, strikethrough, size, and
   colour apply to the characters you highlighted, not the whole label
+- Three font families — sans, serif, and monospace — chosen so a PDF needs
+  no embedded font
 - Correct handling of graphemes, emoji, and bidirectional text
+
+![Text styling, images, and decorations](docs/images/features.png)
 
 **Shapes**
 - All 68 published shape types across eight libraries: Standard, Shapes,
   Flowchart, Containers, BPMN 2.0, Table, Lucidspark, and the AWS, Azure and
   GCP cloud libraries
-- Five more the format does not publish, drawn from their own notations:
-  UML (class, interface, package, actor, use case, lifeline, activation,
-  component, node, state, fork), entity-relationship (entity, weak entity,
-  relationship, attribute and its variants), network (server, router,
-  switch, firewall, workstation, laptop, mobile, printer, rack, access
-  point), wireframe (browser, phone, button, field, checkbox, radio,
-  dropdown, image, nav bar, slider, toggle), and charts (Venn, 2×2 matrix,
-  sitemap page, timeline, milestone)
+- 47 more in five libraries the format does not publish, drawn from their own
+  notations: UML (class, interface, package, actor, use case, lifeline,
+  activation, component, node, state, initial and final state, fork),
+  entity-relationship (entity, weak entity, relationship, attribute and its
+  variants), network (server, router, switch, firewall, workstation, laptop,
+  mobile, printer, rack, access point), wireframe (browser, phone, button,
+  field, checkbox, radio, dropdown, image, nav bar, slider, toggle), and
+  charts (Venn, 2×2 matrix, sitemap page, timeline, milestone)
+- One search box over every library at once, so a shape can be found without
+  first knowing which tab it lives on
 - Star any shape into My Shapes, and save a page as a reusable template —
   both kept beside the settings, so they outlive the document
+- Six starter templates — flowchart, org chart, cross-functional flowchart,
+  network, ER diagram, SWOT — built only from the published vocabulary
 - Fill, stroke, weight, dash style, corner rounding, opacity, z-order
 - Image fills and image blocks, clipped to the shape outline
+
+![The five extension shape libraries](docs/images/shapes.png)
 
 **Connectors**
 - Straight, elbow, and curved routing
@@ -88,13 +112,12 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
   set per end, with a command to reverse a connector
 - Labeled edges
 
-![Text styling, images, and decorations](docs/images/features.png)
-
 **Files**
 - `.lucid` read and write, lossless for fields this build does not interpret
 - `.vsdx` import and export: Visio pages, shapes, text, styling, and
   connectors, with every outline written as real Visio geometry
 - Bundled images decoded and drawn, clipped to any shape outline
+- Custom data fields and a hyperlink on any shape, both published fields
 - CSV data linking: match shape labels against a column of a bundled data
   source and the row's columns land in the shape's data panel. Link a file
   on disk and Refresh Data goes back for whatever it says now
@@ -104,8 +127,11 @@ faithfully. See [Scope](#scope) for what is and is not implemented.
 - SVG and PDF export, as real vectors with real text: labels stay selectable
   and searchable, and a PDF embeds no font because the families the editor
   offers are the ones every reader already has
+- Page setup per page: Letter, Legal, Tabloid, A3, A4, or an infinite canvas
 - Light and dark themes
 - Graph, line, and dot grids
+
+![The dark theme](docs/images/editor-dark.png)
 
 ## Install
 
@@ -139,10 +165,18 @@ diagramcraft export in.lucid out.svg          # ...or to vector SVG
 diagramcraft export in.lucid out.pdf          # ...or to PDF
 diagramcraft export in.lucid out.vsdx         # ...or to a Visio drawing
 diagramcraft import in.vsdx out.lucid         # convert Visio, headlessly
-diagramcraft preview in.lucid shot.png        # screenshot the editor itself
-diagramcraft preview in.lucid shot.png --hover   # ...with the connect arrows out
+diagramcraft icon out.png 512                 # draw the application icon
 diagramcraft demo out.lucid                   # write the bundled sample
+diagramcraft preview in.lucid shot.png        # screenshot the editor itself
 ```
+
+`export` takes `--transparent` to drop the page background, and `preview` takes
+the flags that put the editor into the state worth looking at — `--dark`,
+`--library NAME`, `--menu NAME`, `--settings`, `--rulers`, `--present`,
+`--editing`, `--bold`, `--line`, `--hover`, `--connect`, `--comment`, and
+`--tidy`. Every screenshot in this README came out of `export` or `preview`,
+which is the point: the pictures cannot drift from the program, because the
+program draws them.
 
 Try the sample:
 
@@ -156,23 +190,26 @@ Commands live in the menu bar — **File, Edit, Select, Insert, Format, Arrange,
 View, Help** — so the whole command surface is in one place with its shortcuts
 beside it. On macOS that is the real system menu bar; elsewhere the window
 draws its own. The panels hold what you reach for continuously while drawing:
-the shape palette on the left, with a tab per library; the properties of the
-selection on the right; and the page tabs along the bottom, which can be
-dragged to reorder.
+the shape palette on the left, with a search box and a tab per library; the
+properties of the selection on the right; and the page tabs along the bottom,
+which can be dragged to reorder.
 
 The properties panel draws its choices rather than naming them, the way
 Lucidchart's does: the weight picker shows the weights, the line-style picker
 shows the dashes, the endpoint pickers show the terminators, and the bold
 button is bold. Every row marks the value the selection already has, and shows
 none when the selection disagrees. The panel is also dynamic — connector rows
-appear for connectors, shape rows for shapes, and everything when nothing is
-selected.
+appear for connectors, shape rows for shapes, a link, data fields, and comments
+for a selected shape, and everything when nothing is selected.
+
+![A selected shape, with its link, data, and comment rows](docs/images/selection.png)
 
 ### Settings
 
-`⌘,` opens the preferences: theme, grid style and size, what snaps to what,
-default connector routing, zoom step, and what a new document starts as. They
-are saved as you change them and read back at launch.
+`⌘,` opens the preferences: theme, page bounds, grid style and size, what snaps
+to what, default connector routing, whether lines route around shapes, zoom
+step, and the units and page size a new document starts as. They are saved as
+you change them and read back at launch.
 
 ![Settings](docs/images/settings.png)
 
@@ -180,7 +217,7 @@ are saved as you change them and read back at launch.
 
 | | |
 |---|---|
-| `V` `H` `C` | select, pan, connector |
+| `V` `H` `C` `F` | select, pan, connector, pen |
 | `R` `P` `D` `T` | rectangle, process, decision, text |
 | Space (hold) | pan with any tool |
 | `⌘Z` / `⇧⌘Z` | undo / redo |
@@ -188,17 +225,20 @@ are saved as you change them and read back at launch.
 | `⇧⌘S` `⇧⌘E` | save as, export PNG |
 | `⌘A` `⌘D` | select all, duplicate |
 | `⌘C` `⌘X` `⌘V` | copy, cut, paste |
+| `⌘F` | find and replace |
 | `⌘G` / `⇧⌘G` | group / ungroup |
 | `⌘]` / `⌘[` | bring forward / send backward |
 | `Alt⌘C` / `Alt⌘V` | copy style / paste style |
 | `⌘B` `⌘I` `⌘U` `⇧⌘X` | bold, italic, underline, strikethrough |
 | `⇧⌘.` / `⇧⌘,` | larger / smaller text |
 | `⇧⌘]` / `⇧⌘[` | bring to front / send to back |
+| `⌘+` / `⌘-` | zoom in / out |
 | `⌘0` `⌘1` | actual size, zoom to fit |
 | `⌘,` | settings |
 | Arrows | nudge (hold shift for 10×) |
 | Shift-drag | lock axis, or keep proportions on a corner |
 | `⌘`-drag | bypass snapping |
+| Right-click | the commands for whatever is under the pointer |
 | Drag a page tab | reorder pages |
 
 **While editing a label**
@@ -281,6 +321,9 @@ Known limits:
   writes that row into `customData`, which the format does publish. There is
   no live binding back to the CSV, because the format defines none; re-running
   the link after the data changes refreshes the values in place.
+- **Find searches the current page.** It matches the plain text of shape and
+  connector labels, so a word split across two differently styled runs is
+  still found, but a second page is a second search.
 - **Text is not shrunk to fit.** A word too long for its shape is broken so
   it wraps rather than running out past the edges, but a label with more
   lines than the shape is tall still overflows — clipped to the shape, and

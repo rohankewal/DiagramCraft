@@ -146,10 +146,11 @@ pub fn render_editor_png(
     editor.resize_viewport(canvas.width(), canvas.height());
     // Rebuild so the chrome reflects the camera that was just sized.
     let chrome = Chrome::build_for(window, editor, &metrics, &view, open_menu, None, None);
-    // Presenting frames the page only once the canvas is the whole window.
-    if presenting {
-        editor.zoom_to_fit();
-    }
+    // Opening the document framed it against a default viewport, which is
+    // not the canvas the chrome just left for it — and presenting leaves a
+    // different one again. Reframing here is what keeps a preview from
+    // clipping the drawing it was asked to show.
+    editor.zoom_to_fit();
 
     let mut renderer = Renderer::new();
     renderer.theme = if dark { Theme::dark() } else { Theme::light() };
